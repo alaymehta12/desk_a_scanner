@@ -1,0 +1,5 @@
+streamlit
+kiteconnect
+pandas
+requests
+pyotp
