@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
+import calendar
 from kiteconnect import KiteConnect
 import requests
 import time
@@ -9,66 +10,120 @@ import time
 # 1. PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="Desk A | Real-Time Scanner",
+    page_title="Desk A | Real-Time Institutional Scanner",
     page_icon="⚡",
     layout="wide"
 )
 
-st.title("⚡ Desk A: Cash-Futures & MCX Calendar Spread Scanner")
-st.caption("Project Kavya — Proprietary Institutional Research Dashboard")
+st.title("⚡ Desk A: Institutional Cash-Futures & MCX Spread Scanner")
+st.caption("Project Kavya — Proprietary Institutional Research & Execution Dashboard")
 
 # ==========================================
-# 2. SIDEBAR - SIMPLE AUTHENTICATION
+# 2. SIDEBAR - ADVANCED CONFIGURATION
 # ==========================================
 st.sidebar.header("🔑 Zerodha API Authentication")
-
 DEFAULT_API_KEY = "5pq7uvvfukm67tzt"
-
 api_key = st.sidebar.text_input("API Key", value=DEFAULT_API_KEY)
 access_token = st.sidebar.text_input("Daily Access Token", type="password", help="Paste your active daily session access token here")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 Target Thresholds")
-min_arb_yield = st.sidebar.slider("Min Cash-Futures Yield (% p.a.)", min_value=4.0, max_value=20.0, value=8.0, step=0.5)
+st.sidebar.header("🎯 Filters & Risk Controls")
+
+# Rule 1: Yield Thresholds
+min_arb_yield = st.sidebar.slider("Min Cash-Futures Yield (% p.a.)", min_value=2.0, max_value=20.0, value=6.0, step=0.5)
+
+# Rule 2: Liquidity & Slippage Filters
+min_volume = st.sidebar.number_input("Min Futures Volume", value=100000, step=50000, help="Filters out illiquid futures contracts.")
+max_bid_ask_spread = st.sidebar.number_input("Max Bid-Ask Spread (₹)", value=0.50, step=0.05, help="Maximum gap between top Bid and Ask allowed in order book.")
+
+# Rule 3: Budget & Capital Controls
+max_cash_budget = st.sidebar.number_input("Max Cash Outlay (₹)", value=550000, step=25000, help="Filters out stocks where cash leg exceeds your tranche budget.")
+
+# Rule 4: Expiry Week Cutoff
+min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=7, value=4, help="Auto-switches to Next Month futures if current month DTE is too low.")
+
+st.sidebar.markdown("---")
+st.sidebar.header("⛏️ MCX Options")
 min_mcx_spread = st.sidebar.number_input("Min MCX Spread Trigger (₹)", value=5.0, step=0.5)
 
 st.sidebar.markdown("---")
-st.sidebar.header("🔔 Telegram Alerts (Phase 2)")
+st.sidebar.header("🔔 Telegram Push Alerts")
 enable_alerts = st.sidebar.checkbox("Enable Telegram Push Alerts", value=False)
 telegram_bot_token = st.sidebar.text_input("Bot Token", type="password")
 telegram_chat_id = st.sidebar.text_input("Chat ID")
-
 refresh_interval = st.sidebar.slider("Auto-Refresh Rate (Seconds)", min_value=2, max_value=30, value=5)
 
 # ==========================================
-# 3. EXPANDED WATCHLIST CONFIGURATION
+# 3. EXPANDED F&O WATCHLIST CONFIGURATION
 # ==========================================
+def get_last_thursday(year, month):
+    """Calculates the exact date of the last Thursday for any given month/year (NSE Expiry)."""
+    _, last_day = calendar.monthrange(year, month)
+    dt = date(year, month, last_day)
+    offset = (dt.weekday() - 3) % 7
+    return date(year, month, last_day - offset)
+
 now = datetime.now()
-year_str = now.strftime("%y") # e.g., '26'
-curr_month_str = now.strftime("%b").upper() # e.g., 'JUL'
+today = now.date()
 
-if now.month == 12:
-    next_month_dt = datetime(now.year + 1, 1, 1)
+# Dynamic Contract Month Selection (Current vs. Next Month)
+curr_month_expiry = get_last_thursday(now.year, now.month)
+curr_dte = (curr_month_expiry - today).days
+
+if curr_dte < min_dte_cutoff:
+    # Auto-Rollover to Next Month Contract if Expiry is too close
+    if now.month == 12:
+        target_year, target_month = now.year + 1, 1
+    else:
+        target_year, target_month = now.year, now.month + 1
+    active_expiry = get_last_thursday(target_year, target_month)
+    active_dte = (active_expiry - today).days
+    target_dt = datetime(target_year, target_month, 1)
+    st.info(f"📅 **Auto-Rollover Active:** Current month expires in {curr_dte} days. Scanning **{target_dt.strftime('%b').upper()}** contract (Expiry: {active_expiry}, DTE: {active_dte} days).")
 else:
-    next_month_dt = datetime(now.year, now.month + 1, 1)
-next_month_str = next_month_dt.strftime("%b").upper()
+    active_expiry = curr_month_expiry
+    active_dte = curr_dte
+    target_dt = datetime(now.year, now.month, 1)
 
-# Complete MCX Tradable Commodity Universe
+year_str = target_dt.strftime("%y")
+curr_month_str = target_dt.strftime("%b").upper()
+
+# Next Month String for MCX Spreads
+if now.month == 12:
+    mcx_next_dt = datetime(now.year + 1, 1, 1)
+else:
+    mcx_next_dt = datetime(now.year, now.month + 1, 1)
+mcx_next_month_str = mcx_next_dt.strftime("%b").upper()
+
 MCX_COMMODITIES = [
     "COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL",
     "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "MENTHAOIL"
 ]
 
-# Top Liquid Nifty 100 / F&O Universe
 CASH_FUT_STOCKS = [
-    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL", "ITC", 
-    "LT", "KOTAKBANK", "AXISBANK", "ASIANPAINT", "HINDUNILVR", "BAJFINANCE", "MARUTI", 
-    "SUNPHARMA", "TITAN", "TATASTEEL", "ULTRACEMCO", "POWERGRID", "NTPC", "COALINDIA", 
-    "TATAMOTORS", "M&M", "JSWSTEEL", "GRASIM", "HCLTECH", "TECHM", "WIPRO", "ADANIENT", 
-    "ADANIPORTS", "TATACONSUMER", "BRITANNIA", "EICHERMOT", "DIVISLAB", "DRREDDY", "CIPLA", 
-    "HEROMOTOCO", "APOLLOHOSP", "HDFCLIFE", "SBILIFE", "INDUSINDBK", "BPCL", "HINDPETRO", 
-    "IOC", "BEL", "HAL", "VEDL", "BHEL", "RECLTD", "PFC", "DLF", "TRENT", "GAIL", 
-    "SIEMENS", "ABB", "CANBK", "BANKBARODA", "CHOLAFIN", "SHRIRAMFIN", "TATACOMM"
+    "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT", "ADANIPORTS", 
+    "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY", "ASIANPAINT", "ASTRAL", 
+    "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", 
+    "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA", "BATAINDIA", "BEL", "BERGEPAINT", 
+    "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON", "BOSCHLTD", "BPCL", "BRITANNIA", "BSE", 
+    "CANBK", "CANFINHOME", "CHAMBLFERT", "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", 
+    "CONCOR", "COROMANDEL", "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", 
+    "DIVISLAB", "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK", 
+    "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES", "GRASIM", 
+    "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK", "HDFCLIFE", "HEROMOTOCO", 
+    "HINDALCO", "HINDCOPPER", "HINDPETRO", "HINDUNILVR", "ICICIBANK", "ICICIGI", "ICICIPRULI", 
+    "IDEA", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL", "INDIACEM", "INDIAMART", "INDIGO", 
+    "INDUSINDBK", "INFY", "IOC", "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JIOFIN", "JSWSTEEL", 
+    "JUBLFOOD", "KOTAKBANK", "L&TFH", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", 
+    "LTTS", "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCX", "METROPOLIS", 
+    "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN", "NATIONALUM", "NAUKRI", 
+    "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY", "OFSS", "ONGC", "PAGEIND", "PEL", 
+    "PERSISTENT", "PETRONET", "PFC", "PIDILITIND", "PIIND", "PNB", "POLYCAB", "POWERGRID", 
+    "PVRINOX", "RAMCOCEM", "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", 
+    "SHREECEM", "SHRIRAMFIN", "SIEMENS", "SRF", "SUNTV", "SUNPHARMA", "SYNGENE", "TATACHEM", 
+    "TATACOMM", "TATACONSUMER", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM", "TITAN", 
+    "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL", "VOLTAS", "WIPRO", 
+    "ZEEL", "ZYDUSLIFE"
 ]
 
 # ==========================================
@@ -81,8 +136,8 @@ def send_telegram_alert(message, token, chat_id):
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload, timeout=3)
-    except Exception as e:
-        st.error(f"Telegram alert error: {e}")
+    except Exception:
+        pass
 
 def initialize_kite(key, token):
     try:
@@ -93,55 +148,49 @@ def initialize_kite(key, token):
         st.error(f"Kite Connection Error: {e}")
         return None
 
-@st.cache_data(ttl=86400) # Cache lot sizes for 24 hours
+@st.cache_data(ttl=86400)
 def get_lot_sizes(_kite, exchange):
-    """Fetches and caches live lot sizes from Zerodha for accurate net profit calculations."""
     try:
         instruments = _kite.instruments(exchange)
         return {item["tradingsymbol"]: item["lot_size"] for item in instruments}
-    except Exception as e:
+    except Exception:
         return {}
 
 def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_price, fut_buy_price, qty):
-    """
-    Calculates the precise Net Profit of a Cash-Futures arbitrage trade on Zerodha.
-    Assumes standard F&O lot sizes (where 0.03% brokerage > Rs 20, capping it at Rs 20/order).
-    """
-    # 1. CASH LEG (EQUITY DELIVERY) CHARGES
+    # CASH LEG CHARGES
     cash_buy_val = cash_buy_price * qty
     cash_sell_val = cash_sell_price * qty
     cash_turnover = cash_buy_val + cash_sell_val
-    
     cash_brokerage = 0.0 
-    cash_stt = (cash_buy_val * 0.001) + (cash_sell_val * 0.001)  # 0.1% on Buy & Sell
-    cash_exc_txn = cash_turnover * 0.0000307  # NSE Txn Charge 0.00307%
-    cash_stamp = cash_buy_val * 0.00015  # 0.015% Stamp Duty on Buy side only
-    cash_sebi = cash_turnover * 0.000001  # Rs 10 per crore
+    cash_stt = (cash_buy_val * 0.001) + (cash_sell_val * 0.001)
+    cash_exc_txn = cash_turnover * 0.0000307
+    cash_stamp = cash_buy_val * 0.00015
+    cash_sebi = cash_turnover * 0.000001
     cash_gst = (cash_brokerage + cash_exc_txn + cash_sebi) * 0.18  
-    cash_dp = 15.93  # Zerodha DP Charge 
-    
+    cash_dp = 15.93
     total_cash_charges = cash_brokerage + cash_stt + cash_exc_txn + cash_stamp + cash_sebi + cash_gst + cash_dp
     
-    # 2. FUTURES LEG CHARGES
+    # FUTURES LEG CHARGES
     fut_sell_val = fut_sell_price * qty
     fut_buy_val = fut_buy_price * qty 
     fut_turnover = fut_sell_val + fut_buy_val
-    
-    fut_brokerage = 40.0  # Rs 20 entry + Rs 20 exit
-    fut_stt = fut_sell_val * 0.0002  # 0.02% STT applied ONLY on the Sell side
-    fut_exc_txn = fut_turnover * 0.0000183  # NSE Txn Charge 0.00183%
-    fut_stamp = fut_buy_val * 0.00002  # 0.002% Stamp Duty on Buy side only
+    fut_brokerage = 40.0
+    fut_stt = fut_sell_val * 0.0002
+    fut_exc_txn = fut_turnover * 0.0000183
+    fut_stamp = fut_buy_val * 0.00002
     fut_sebi = fut_turnover * 0.000001  
     fut_gst = (fut_brokerage + fut_exc_txn + fut_sebi) * 0.18 
-    
     total_fut_charges = fut_brokerage + fut_stt + fut_exc_txn + fut_stamp + fut_sebi + fut_gst
     
-    # 3. PROFIT CALCULATION
     gross_profit = (cash_sell_val - cash_buy_val) + (fut_sell_val - fut_buy_val)
     total_charges = total_cash_charges + total_fut_charges
     net_profit = gross_profit - total_charges
     
     return round(total_charges, 2), round(net_profit, 2)
+
+def chunk_list(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 # ==========================================
 # 5. DASHBOARD RENDER
@@ -153,20 +202,16 @@ if not access_token:
 kite = initialize_kite(api_key, access_token)
 
 if kite:
-    # Pre-fetch and cache lot sizes natively from the API
     nfo_lot_sizes = get_lot_sizes(kite, "NFO")
     
     tab1, tab2, tab3 = st.tabs([
-        "📈 Cash-Futures Arbitrage (Equity)", 
-        "⛏️ MCX Calendar Spreads (Commodities)", 
-        "📖 Strategy & System Docs"
+        "📈 Cash-Futures Arbitrage Board", 
+        "⛏️ MCX Calendar Spreads", 
+        "📖 System & Risk Documentation"
     ])
 
-    # ------------------------------------------
-    # TAB 1: CASH-FUTURES ARBITRAGE
-    # ------------------------------------------
     with tab1:
-        st.subheader(f"Equity Cash vs. Futures Scanner ({len(CASH_FUT_STOCKS)} Stocks)")
+        st.subheader(f"Equity Cash vs. Futures Scanner ({len(CASH_FUT_STOCKS)} Stocks | Expiry: {active_expiry})")
         
         symbols_to_quote = []
         for stock in CASH_FUT_STOCKS:
@@ -175,8 +220,10 @@ if kite:
             symbols_to_quote.extend([cash_sym, fut_sym])
             
         try:
-            # Query all stock quotes in a single batched API call
-            quotes = kite.quote(symbols_to_quote)
+            quotes = {}
+            for chunk in chunk_list(symbols_to_quote, 400):
+                quotes.update(kite.quote(chunk))
+                
             arb_data = []
 
             for stock in CASH_FUT_STOCKS:
@@ -190,65 +237,108 @@ if kite:
                 if cash_q and fut_q:
                     cash_price = cash_q["last_price"]
                     fut_price = fut_q["last_price"]
+                    fut_volume = fut_q.get("volume", 0)
                     
-                    if cash_price > 0 and fut_price > 0:
+                    # Extract Order Book Depth for Bid-Ask Spread Check
+                    fut_depth = fut_q.get("depth", {})
+                    buy_orders = fut_depth.get("buy", [])
+                    sell_orders = fut_depth.get("sell", [])
+                    
+                    if buy_orders and sell_orders:
+                        top_bid = buy_orders[0].get("price", 0)
+                        top_ask = sell_orders[0].get("price", 0)
+                        bid_ask_gap = round(top_ask - top_bid, 2) if (top_ask > 0 and top_bid > 0) else 0.0
+                    else:
+                        bid_ask_gap = 0.0
+
+                    # Lot Size & Capital Metrics
+                    lot_size = nfo_lot_sizes.get(fut_contract_name, 1000)
+                    cash_outlay = cash_price * lot_size
+                    fut_margin = (fut_price * lot_size) * 0.20  # ~20% standard margin requirement
+                    total_capital_req = cash_outlay + fut_margin
+                    
+                    # ==========================================
+                    # APPLY ALL 4 FILTRATION LOGIC RULES
+                    # ==========================================
+                    
+                    # Rule 1 & 2: Volume + Bid-Ask Spread Filter + Budget Constraint
+                    if (cash_price > 0 and fut_price > 0 and 
+                        fut_volume >= min_volume and 
+                        bid_ask_gap <= max_bid_ask_spread and 
+                        cash_outlay <= max_cash_budget):
+                        
                         abs_spread = fut_price - cash_price
-                        days_to_expiry = max((30 - now.day), 1)
                         
-                        # Fetch the dynamic lot size from our cached API pull
-                        lot_size = nfo_lot_sizes.get(fut_contract_name, 1000) # Default 1000 if not found
-                        
-                        # We simulate closing the trade precisely when prices converge exactly on Expiry
                         total_taxes, net_profit = calculate_arbitrage_net_profit(
                             cash_buy_price=cash_price,
-                            cash_sell_price=fut_price,  # Convergence Price
+                            cash_sell_price=fut_price,
                             fut_sell_price=fut_price,
-                            fut_buy_price=fut_price,    # Convergence Price
+                            fut_buy_price=fut_price, 
                             qty=lot_size
                         )
 
-                        annualized_yield = ((abs_spread / cash_price) * (365 / days_to_expiry)) * 100
+                        # Rule 3: Strict Positive Net Profit
+                        if net_profit > 0:
+                            annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
+                            rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
 
-                        if enable_alerts and annualized_yield >= min_arb_yield:
-                            msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nSpread: ₹{abs_spread:.2f}\nNet Profit: ₹{net_profit}"
-                            send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
+                            # Rule 4: Dividend / Anomaly Flagging
+                            if annualized_yield > 25.0:
+                                status_tag = "⚠️ Dividend/Ban Check"
+                            elif annualized_yield >= min_arb_yield:
+                                status_tag = "🔥 TARGET HIT"
+                            else:
+                                status_tag = "Normal"
 
-                        arb_data.append({
-                            "Symbol": stock,
-                            "Future Contract": fut_contract_name,
-                            "Cash Price (₹)": f"{cash_price:.2f}",
-                            "Future Price (₹)": f"{fut_price:.2f}",
-                            "Lot Size": lot_size,
-                            "Spread (₹)": round(abs_spread, 2),
-                            "Yield (% p.a.)": round(annualized_yield, 2),
-                            "Total Taxes (₹)": total_taxes,
-                            "Net Profit (₹)": net_profit,
-                            "Status": "🔥 OPPORTUNITY" if annualized_yield >= min_arb_yield else "Normal"
-                        })
+                            if enable_alerts and annualized_yield >= min_arb_yield and annualized_yield <= 25.0:
+                                msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nROTC: {rotc_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}\nCash Outlay: ₹{cash_outlay:,.0f}"
+                                send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
+
+                            arb_data.append({
+                                "Symbol": stock,
+                                "Contract": fut_contract_name,
+                                "Cash Price (₹)": f"{cash_price:.2f}",
+                                "Future Price (₹)": f"{fut_price:.2f}",
+                                "Lot Size": lot_size,
+                                "Cash Outlay (₹)": f"{cash_outlay:,.0f}",
+                                "Total Capital (₹)": f"{total_capital_req:,.0f}",
+                                "Bid-Ask Gap (₹)": bid_ask_gap,
+                                "Volume": fut_volume,
+                                "DTE": active_dte,
+                                "Spread (₹)": round(abs_spread, 2),
+                                "Yield (% p.a.)": round(annualized_yield, 2),
+                                "ROTC (% p.a.)": round(rotc_yield, 2),
+                                "Net Profit (₹)": net_profit,
+                                "Status": status_tag
+                            })
 
             df_arb = pd.DataFrame(arb_data)
-            df_arb = df_arb.sort_values(by="Yield (% p.a.)", ascending=False).reset_index(drop=True)
+            
+            if not df_arb.empty:
+                # Ranked by ROTC (Return on Total Capital) for maximum budget efficiency
+                df_arb = df_arb.sort_values(by="ROTC (% p.a.)", ascending=False).reset_index(drop=True)
+                
+                def highlight_arb(row):
+                    if row["Status"] == "🔥 TARGET HIT":
+                        return ['background-color: #1e3d2f; color: #7cfc00'] * len(row)
+                    elif row["Status"] == "⚠️ Dividend/Ban Check":
+                        return ['background-color: #4a3800; color: #ffcc00'] * len(row)
+                    return [''] * len(row)
 
-            def highlight_arb(row):
-                if row["Yield (% p.a.)"] >= min_arb_yield and row["Net Profit (₹)"] > 0:
-                    return ['background-color: #1e3d2f; color: #7cfc00'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
+                st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
+            else:
+                st.info("No arbitrage opportunities match all 4 risk filters (Budget, Volume, Bid-Ask Spread, Net Profit) at this time.")
 
         except Exception as e:
-            st.error(f"Error fetching Cash-Futures data: {e}")
+            st.error(f"Error processing Cash-Futures data: {e}")
 
-    # ------------------------------------------
-    # TAB 2: MCX CALENDAR SPREADS
-    # ------------------------------------------
     with tab2:
         st.subheader("All MCX Commodity Calendar Spread Scanner")
         
         mcx_symbols = []
         for metal in MCX_COMMODITIES:
             near_sym = f"MCX:{metal}{year_str}{curr_month_str}FUT"
-            far_sym = f"MCX:{metal}{year_str}{next_month_str}FUT"
+            far_sym = f"MCX:{metal}{year_str}{mcx_next_month_str}FUT"
             mcx_symbols.extend([near_sym, far_sym])
 
         try:
@@ -257,7 +347,7 @@ if kite:
 
             for metal in MCX_COMMODITIES:
                 near_contract_name = f"{metal}{year_str}{curr_month_str}FUT"
-                far_contract_name = f"{metal}{year_str}{next_month_str}FUT"
+                far_contract_name = f"{metal}{year_str}{mcx_next_month_str}FUT"
                 near_sym = f"MCX:{near_contract_name}"
                 far_sym = f"MCX:{far_contract_name}"
 
@@ -295,40 +385,14 @@ if kite:
         except Exception as e:
             st.error(f"Error fetching MCX data: {e}")
 
-    # ------------------------------------------
-    # TAB 3: DOCUMENTATION & SYSTEM README
-    # ------------------------------------------
     with tab3:
         st.markdown("""
-        # 📖 Project Kavya — Desk A Documentation & Operational Guide
+        ### 📖 Desk A Risk Rules & System Logic
 
-        ---
-
-        ### 1. Executive Summary
-        **Project Kavya** is an 18-year wealth compounding initiative. Desk A generates non-directional, low-volatility yield to build the primary balance sheet before transitioning into tactical hedge-fund bets.
-
-        ---
-
-        ### 2. Desk A Mathematical Models
-
-        #### A. Cash-Futures Arbitrage Engine
-        * **Mathematical Formula:** 
-          $$\\text{Annualized Yield (\\%)} = \\left( \\frac{\\text{Future Price} - \\text{Cash Price}}{\\text{Cash Price}} \\right) \\times \\left( \\frac{365}{\\text{Days to Expiry}} \\right) \\times 100$$
-        * **Execution:** Buy cash delivery, short near-month future when yield crosses target.
-
-        #### B. MCX Calendar Spreads
-        * **Mathematical Formula:**
-          $$\\text{Spread} = \\text{Far Month Price} - \\text{Near Month Price}$$
-        * **Execution:** Trade time-spread dislocations between near and far month futures.
-
-        ---
-
-        ### 3. Net Profit Calculator Parameters
-        The embedded Net Profit calculator deducts the following exact exchange fees from your gross spread:
-        * 0.1% STT on both Buy/Sell Equity Turnover
-        * 0.02% STT on short Futures Turnover
-        * 18% GST on all brokerages, NSE transaction fees, and SEBI charges
-        * ₹15.93 Depository Participant (DP) charge on the cash exit leg.
+        1. **Bid-Ask Spread Filter:** Reads top depth (`buy[0]` and `sell[0]`). Hides stocks with gaps > ₹0.50 to eliminate execution slippage.
+        2. **ROTC (Return on Total Capital):** Ranks opportunities by annualized return on combined cash outlay and futures margin requirement.
+        3. **Dynamic DTE Rollover:** Auto-switches to next month's futures contract if current month expiry is less than 4 days away.
+        4. **Dividend Anomaly Warning:** Flags any yield > 25% p.a. as `⚠️ Dividend/Ban Check` to avoid fake price discrepancies caused by corporate action adjustments.
         """)
 
     time.sleep(refresh_interval)
