@@ -92,6 +92,59 @@ def initialize_kite(key, token):
     except Exception as e:
         st.error(f"Kite Connection Error: {e}")
         return None
+def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_price, fut_buy_price, qty):
+    """
+    Calculates the precise Net Profit of a Cash-Futures arbitrage trade on Zerodha.
+    Assumes standard F&O lot sizes (where 0.03% brokerage > Rs 20, capping it at Rs 20/order).
+    """
+    
+    # ==========================================
+    # 1. CASH LEG (EQUITY DELIVERY) CHARGES
+    # ==========================================
+    cash_buy_val = cash_buy_price * qty
+    cash_sell_val = cash_sell_price * qty
+    cash_turnover = cash_buy_val + cash_sell_val
+    
+    cash_brokerage = 0.0  # Zero brokerage for equity delivery
+    cash_stt = (cash_buy_val * 0.001) + (cash_sell_val * 0.001)  # 0.1% on Buy & Sell
+    cash_exc_txn = cash_turnover * 0.0000307  # NSE Transaction Charge 0.00307%
+    cash_stamp = cash_buy_val * 0.00015  # 0.015% Stamp Duty on Buy side only
+    cash_sebi = cash_turnover * 0.000001  # Rs 10 per crore (0.0001%)
+    cash_gst = (cash_brokerage + cash_exc_txn + cash_sebi) * 0.18  # 18% GST
+    cash_dp = 15.93  # Zerodha DP Charge (Rs 13.5 + 18% GST) applied once on sell
+    
+    total_cash_charges = cash_brokerage + cash_stt + cash_exc_txn + cash_stamp + cash_sebi + cash_gst + cash_dp
+    
+    # ==========================================
+    # 2. FUTURES LEG CHARGES
+    # ==========================================
+    # Note: Arbitrage involves shorting the future first (Sell), then buying back (Buy)
+    fut_sell_val = fut_sell_price * qty
+    fut_buy_val = fut_buy_price * qty 
+    fut_turnover = fut_sell_val + fut_buy_val
+    
+    fut_brokerage = 40.0  # Rs 20 entry + Rs 20 exit
+    fut_stt = fut_sell_val * 0.0002  # 0.02% STT applied ONLY on the Sell side
+    fut_exc_txn = fut_turnover * 0.0000183  # NSE Transaction Charge 0.00183%
+    fut_stamp = fut_buy_val * 0.00002  # 0.002% Stamp Duty on Buy side only
+    fut_sebi = fut_turnover * 0.000001  # Rs 10 per crore (0.0001%)
+    fut_gst = (fut_brokerage + fut_exc_txn + fut_sebi) * 0.18  # 18% GST
+    
+    total_fut_charges = fut_brokerage + fut_stt + fut_exc_txn + fut_stamp + fut_sebi + fut_gst
+    
+    # ==========================================
+    # 3. PROFIT CALCULATION
+    # ==========================================
+    # Gross Profit = (Cash Profit) + (Future Profit)
+    gross_profit = (cash_sell_val - cash_buy_val) + (fut_sell_val - fut_buy_val)
+    total_charges = total_cash_charges + total_fut_charges
+    net_profit = gross_profit - total_charges
+    
+    return {
+        "Gross Profit (₹)": round(gross_profit, 2),
+        "Total Taxes & Fees (₹)": round(total_charges, 2),
+        "Net Profit (₹)": round(net_profit, 2)
+    }
 
 # ==========================================
 # 5. DASHBOARD RENDER
