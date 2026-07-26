@@ -44,8 +44,8 @@ refresh_interval = st.sidebar.slider("Auto-Refresh Rate (Seconds)", min_value=2,
 # 3. EXPANDED WATCHLIST CONFIGURATION
 # ==========================================
 now = datetime.now()
-year_str = now.strftime("%y") # '26'
-curr_month_str = now.strftime("%b").upper() # 'JUL'
+year_str = now.strftime("%y") # e.g., '26'
+curr_month_str = now.strftime("%b").upper() # e.g., 'JUL'
 
 if now.month == 12:
     next_month_dt = datetime(now.year + 1, 1, 1)
@@ -59,7 +59,7 @@ MCX_COMMODITIES = [
     "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "MENTHAOIL"
 ]
 
-# Top Liquid Nifty 100 / F&O Universe (Expanded)
+# Top Liquid Nifty 100 / F&O Universe
 CASH_FUT_STOCKS = [
     "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL", "ITC", 
     "LT", "KOTAKBANK", "AXISBANK", "ASIANPAINT", "HINDUNILVR", "BAJFINANCE", "MARUTI", 
@@ -92,59 +92,56 @@ def initialize_kite(key, token):
     except Exception as e:
         st.error(f"Kite Connection Error: {e}")
         return None
+
+@st.cache_data(ttl=86400) # Cache lot sizes for 24 hours
+def get_lot_sizes(_kite, exchange):
+    """Fetches and caches live lot sizes from Zerodha for accurate net profit calculations."""
+    try:
+        instruments = _kite.instruments(exchange)
+        return {item["tradingsymbol"]: item["lot_size"] for item in instruments}
+    except Exception as e:
+        return {}
+
 def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_price, fut_buy_price, qty):
     """
     Calculates the precise Net Profit of a Cash-Futures arbitrage trade on Zerodha.
     Assumes standard F&O lot sizes (where 0.03% brokerage > Rs 20, capping it at Rs 20/order).
     """
-    
-    # ==========================================
     # 1. CASH LEG (EQUITY DELIVERY) CHARGES
-    # ==========================================
     cash_buy_val = cash_buy_price * qty
     cash_sell_val = cash_sell_price * qty
     cash_turnover = cash_buy_val + cash_sell_val
     
-    cash_brokerage = 0.0  # Zero brokerage for equity delivery
+    cash_brokerage = 0.0 
     cash_stt = (cash_buy_val * 0.001) + (cash_sell_val * 0.001)  # 0.1% on Buy & Sell
-    cash_exc_txn = cash_turnover * 0.0000307  # NSE Transaction Charge 0.00307%
+    cash_exc_txn = cash_turnover * 0.0000307  # NSE Txn Charge 0.00307%
     cash_stamp = cash_buy_val * 0.00015  # 0.015% Stamp Duty on Buy side only
-    cash_sebi = cash_turnover * 0.000001  # Rs 10 per crore (0.0001%)
-    cash_gst = (cash_brokerage + cash_exc_txn + cash_sebi) * 0.18  # 18% GST
-    cash_dp = 15.93  # Zerodha DP Charge (Rs 13.5 + 18% GST) applied once on sell
+    cash_sebi = cash_turnover * 0.000001  # Rs 10 per crore
+    cash_gst = (cash_brokerage + cash_exc_txn + cash_sebi) * 0.18  
+    cash_dp = 15.93  # Zerodha DP Charge 
     
     total_cash_charges = cash_brokerage + cash_stt + cash_exc_txn + cash_stamp + cash_sebi + cash_gst + cash_dp
     
-    # ==========================================
     # 2. FUTURES LEG CHARGES
-    # ==========================================
-    # Note: Arbitrage involves shorting the future first (Sell), then buying back (Buy)
     fut_sell_val = fut_sell_price * qty
     fut_buy_val = fut_buy_price * qty 
     fut_turnover = fut_sell_val + fut_buy_val
     
     fut_brokerage = 40.0  # Rs 20 entry + Rs 20 exit
     fut_stt = fut_sell_val * 0.0002  # 0.02% STT applied ONLY on the Sell side
-    fut_exc_txn = fut_turnover * 0.0000183  # NSE Transaction Charge 0.00183%
+    fut_exc_txn = fut_turnover * 0.0000183  # NSE Txn Charge 0.00183%
     fut_stamp = fut_buy_val * 0.00002  # 0.002% Stamp Duty on Buy side only
-    fut_sebi = fut_turnover * 0.000001  # Rs 10 per crore (0.0001%)
-    fut_gst = (fut_brokerage + fut_exc_txn + fut_sebi) * 0.18  # 18% GST
+    fut_sebi = fut_turnover * 0.000001  
+    fut_gst = (fut_brokerage + fut_exc_txn + fut_sebi) * 0.18 
     
     total_fut_charges = fut_brokerage + fut_stt + fut_exc_txn + fut_stamp + fut_sebi + fut_gst
     
-    # ==========================================
     # 3. PROFIT CALCULATION
-    # ==========================================
-    # Gross Profit = (Cash Profit) + (Future Profit)
     gross_profit = (cash_sell_val - cash_buy_val) + (fut_sell_val - fut_buy_val)
     total_charges = total_cash_charges + total_fut_charges
     net_profit = gross_profit - total_charges
     
-    return {
-        "Gross Profit (₹)": round(gross_profit, 2),
-        "Total Taxes & Fees (₹)": round(total_charges, 2),
-        "Net Profit (₹)": round(net_profit, 2)
-    }
+    return round(total_charges, 2), round(net_profit, 2)
 
 # ==========================================
 # 5. DASHBOARD RENDER
@@ -156,6 +153,9 @@ if not access_token:
 kite = initialize_kite(api_key, access_token)
 
 if kite:
+    # Pre-fetch and cache lot sizes natively from the API
+    nfo_lot_sizes = get_lot_sizes(kite, "NFO")
+    
     tab1, tab2, tab3 = st.tabs([
         "📈 Cash-Futures Arbitrage (Equity)", 
         "⛏️ MCX Calendar Spreads (Commodities)", 
@@ -190,34 +190,47 @@ if kite:
                 if cash_q and fut_q:
                     cash_price = cash_q["last_price"]
                     fut_price = fut_q["last_price"]
-                    abs_spread = fut_price - cash_price
+                    
+                    if cash_price > 0 and fut_price > 0:
+                        abs_spread = fut_price - cash_price
+                        days_to_expiry = max((30 - now.day), 1)
+                        
+                        # Fetch the dynamic lot size from our cached API pull
+                        lot_size = nfo_lot_sizes.get(fut_contract_name, 1000) # Default 1000 if not found
+                        
+                        # We simulate closing the trade precisely when prices converge exactly on Expiry
+                        total_taxes, net_profit = calculate_arbitrage_net_profit(
+                            cash_buy_price=cash_price,
+                            cash_sell_price=fut_price,  # Convergence Price
+                            fut_sell_price=fut_price,
+                            fut_buy_price=fut_price,    # Convergence Price
+                            qty=lot_size
+                        )
 
-                    days_to_expiry = max((30 - now.day), 1)
-                    annualized_yield = ((abs_spread / cash_price) * (365 / days_to_expiry)) * 100 if cash_price > 0 else 0
+                        annualized_yield = ((abs_spread / cash_price) * (365 / days_to_expiry)) * 100
 
-                    if enable_alerts and annualized_yield >= min_arb_yield:
-                        msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nContract: `{fut_contract_name}`\nYield: {annualized_yield:.2f}% p.a.\nSpread: ₹{abs_spread:.2f}"
-                        send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
+                        if enable_alerts and annualized_yield >= min_arb_yield:
+                            msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nSpread: ₹{abs_spread:.2f}\nNet Profit: ₹{net_profit}"
+                            send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
-                    arb_data.append({
-                        "Symbol": stock,
-                        "Cash Contract": cash_sym,
-                        "Future Contract": fut_contract_name,
-                        "Cash Price (₹)": f"{cash_price:.2f}",
-                        "Future Price (₹)": f"{fut_price:.2f}",
-                        "Spread (₹)": round(abs_spread, 2),
-                        "Est. Days to Expiry": days_to_expiry,
-                        "Annualized Yield (%)": round(annualized_yield, 2),
-                        "Status": "🔥 OPPORTUNITY" if annualized_yield >= min_arb_yield else "Normal"
-                    })
+                        arb_data.append({
+                            "Symbol": stock,
+                            "Future Contract": fut_contract_name,
+                            "Cash Price (₹)": f"{cash_price:.2f}",
+                            "Future Price (₹)": f"{fut_price:.2f}",
+                            "Lot Size": lot_size,
+                            "Spread (₹)": round(abs_spread, 2),
+                            "Yield (% p.a.)": round(annualized_yield, 2),
+                            "Total Taxes (₹)": total_taxes,
+                            "Net Profit (₹)": net_profit,
+                            "Status": "🔥 OPPORTUNITY" if annualized_yield >= min_arb_yield else "Normal"
+                        })
 
             df_arb = pd.DataFrame(arb_data)
-            
-            # Sort highest yield to lowest
-            df_arb = df_arb.sort_values(by="Annualized Yield (%)", ascending=False).reset_index(drop=True)
+            df_arb = df_arb.sort_values(by="Yield (% p.a.)", ascending=False).reset_index(drop=True)
 
             def highlight_arb(row):
-                if row["Annualized Yield (%)"] >= min_arb_yield:
+                if row["Yield (% p.a.)"] >= min_arb_yield and row["Net Profit (₹)"] > 0:
                     return ['background-color: #1e3d2f; color: #7cfc00'] * len(row)
                 return [''] * len(row)
 
@@ -257,7 +270,7 @@ if kite:
                     spread = far_price - near_price
 
                     if enable_alerts and abs(spread) >= min_mcx_spread:
-                        msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nNear: `{near_contract_name}` (₹{near_price})\nFar: `{far_contract_name}` (₹{far_price})\nSpread: ₹{spread:.2f}"
+                        msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nNear: {near_price}\nFar: {far_price}\nSpread: ₹{spread:.2f}"
                         send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
                     spread_data.append({
@@ -301,17 +314,21 @@ if kite:
         #### A. Cash-Futures Arbitrage Engine
         * **Mathematical Formula:** 
           $$\\text{Annualized Yield (\\%)} = \\left( \\frac{\\text{Future Price} - \\text{Cash Price}}{\\text{Cash Price}} \\right) \\times \\left( \\frac{365}{\\text{Days to Expiry}} \\right) \\times 100$$
-        * **Execution:** Buy cash delivery, short near-month future when yield crosses target (e.g., > 8.0% p.a.).
+        * **Execution:** Buy cash delivery, short near-month future when yield crosses target.
 
         #### B. MCX Calendar Spreads
         * **Mathematical Formula:**
           $$\\text{Spread} = \\text{Far Month Price} - \\text{Near Month Price}$$
-        * **Execution:** Trade time-spread dislocations between near and far month futures across base metals, energy, and bullion.
+        * **Execution:** Trade time-spread dislocations between near and far month futures.
 
         ---
 
-        ### 3. Multi-User Account Isolation
-        * **MCX Tracking:** All MCX trades executed for Project Kavya must be logged into a dedicated sub-portfolio (e.g., MProfit) to prevent co-mingling with shared family accounts.
+        ### 3. Net Profit Calculator Parameters
+        The embedded Net Profit calculator deducts the following exact exchange fees from your gross spread:
+        * 0.1% STT on both Buy/Sell Equity Turnover
+        * 0.02% STT on short Futures Turnover
+        * 18% GST on all brokerages, NSE transaction fees, and SEBI charges
+        * ₹15.93 Depository Participant (DP) charge on the cash exit leg.
         """)
 
     time.sleep(refresh_interval)
