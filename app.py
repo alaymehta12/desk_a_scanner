@@ -27,24 +27,19 @@ api_key = st.sidebar.text_input("API Key", value=DEFAULT_API_KEY)
 access_token = st.sidebar.text_input("Daily Access Token", type="password", help="Paste your active daily session access token here")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 Filters & Risk Controls")
+st.sidebar.header("🎯 Target Thresholds & Filters")
 
-# Rule 1: Yield Thresholds
+# Yield & Liquidity Filters
 min_arb_yield = st.sidebar.slider("Min Cash-Futures Yield (% p.a.)", min_value=2.0, max_value=20.0, value=6.0, step=0.5)
-
-# Rule 2: Liquidity & Slippage Filters
 min_volume = st.sidebar.number_input("Min Futures Volume", value=100000, step=50000, help="Filters out illiquid futures contracts.")
 max_bid_ask_spread = st.sidebar.number_input("Max Bid-Ask Spread (₹)", value=0.50, step=0.05, help="Maximum gap between top Bid and Ask allowed in order book.")
 
-# Rule 3: Budget & Capital Controls
-max_cash_budget = st.sidebar.number_input("Max Cash Outlay (₹)", value=550000, step=25000, help="Filters out stocks where cash leg exceeds your tranche budget.")
-
-# Rule 4: Expiry Week Cutoff
-min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=7, value=4, help="Auto-switches to Next Month futures if current month DTE is too low.")
+# Expiry Cutoff
+min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=10, value=4, help="Auto-switches to Next Month futures if current month DTE is less than or equal to this.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ System Debugging")
-show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Stocks (Debug Mode)", value=True, help="Shows all stocks and why they were filtered out.")
+show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Stocks (Debug Mode)", value=True, help="Shows stocks failing volume/spread constraints (Negative return stocks are ALWAYS hidden).")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⛏️ MCX Options")
@@ -74,7 +69,8 @@ today = now.date()
 curr_month_expiry = get_last_thursday(now.year, now.month)
 curr_dte = (curr_month_expiry - today).days
 
-if curr_dte < min_dte_cutoff:
+# UPDATED LOGIC: Trigger rollover if DTE is less than OR EQUAL to cutoff
+if curr_dte <= min_dte_cutoff:
     # Auto-Rollover to Next Month Contract if Expiry is too close
     if now.month == 12:
         target_year, target_month = now.year + 1, 1
@@ -272,16 +268,18 @@ if kite:
                         qty=lot_size
                     )
 
+                    # STRICT RULE: Completely filter out any stock with negative or zero net profit
+                    if net_profit <= 0:
+                        continue
+
                     annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
                     rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
 
-                    # Evaluate if stock passes all risk/budget filters
+                    # Evaluate liquidity and execution filters
                     passed_all_filters = (
                         cash_price > 0 and fut_price > 0 and 
                         fut_volume >= min_volume and 
-                        bid_ask_gap <= max_bid_ask_spread and 
-                        cash_outlay <= max_cash_budget and
-                        net_profit > 0
+                        bid_ask_gap <= max_bid_ask_spread
                     )
 
                     # Determine specific status tag
@@ -293,11 +291,7 @@ if kite:
                         else:
                             status_tag = "Normal"
                     else:
-                        if net_profit <= 0:
-                            status_tag = "❌ Negative Net Profit"
-                        elif cash_outlay > max_cash_budget:
-                            status_tag = "❌ Over Budget"
-                        elif fut_volume < min_volume:
+                        if fut_volume < min_volume:
                             status_tag = "❌ Low Volume"
                         elif bid_ask_gap > max_bid_ask_spread:
                             status_tag = "❌ Wide Spread (Slippage)"
@@ -309,7 +303,7 @@ if kite:
                         msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nROTC: {rotc_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}\nCash Outlay: ₹{cash_outlay:,.0f}"
                         send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
-                    # Only append if passed OR if Debug Mode is ON
+                    # Append to dataset if passed OR if Debug Mode is ON
                     if passed_all_filters or show_filtered_stocks:
                         arb_data.append({
                             "Symbol": stock,
@@ -332,9 +326,12 @@ if kite:
             df_arb = pd.DataFrame(arb_data)
             
             if not df_arb.empty:
-                # Rank by ROTC, pushing rejected stocks to the bottom
+                # SORTING LOGIC: Best ROTC % p.a. and Highest Net Profit (₹) first; pushed rejected stocks to the bottom
                 df_arb['is_rejected'] = df_arb['Status'].str.contains("❌")
-                df_arb = df_arb.sort_values(by=["is_rejected", "ROTC (% p.a.)"], ascending=[True, False]).drop(columns=['is_rejected']).reset_index(drop=True)
+                df_arb = df_arb.sort_values(
+                    by=["is_rejected", "ROTC (% p.a.)", "Net Profit (₹)"], 
+                    ascending=[True, False, False]
+                ).drop(columns=['is_rejected']).reset_index(drop=True)
                 
                 def highlight_arb(row):
                     if row["Status"] == "🔥 TARGET HIT":
@@ -347,7 +344,7 @@ if kite:
 
                 st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
             else:
-                st.info("No arbitrage opportunities found. Toggle 'Show Filtered/Rejected Stocks' in the sidebar to see diagnostic data.")
+                st.info("No positive-yield arbitrage opportunities found. Zero and negative net return stocks have been filtered out.")
 
         except Exception as e:
             st.error(f"Error processing Cash-Futures data: {e}")
@@ -409,11 +406,11 @@ if kite:
         st.markdown("""
         ### 📖 Desk A Risk Rules & System Logic
 
-        1. **Bid-Ask Spread Filter:** Reads top depth (`buy[0]` and `sell[0]`). Hides stocks with gaps > ₹0.50 to eliminate execution slippage.
-        2. **ROTC (Return on Total Capital):** Ranks opportunities by annualized return on combined cash outlay and futures margin requirement.
-        3. **Dynamic DTE Rollover:** Auto-switches to next month's futures contract if current month expiry is less than the specified days away.
-        4. **Dividend Anomaly Warning:** Flags any yield > 25% p.a. as `⚠️ Dividend/Ban Check` to avoid fake price discrepancies caused by corporate action adjustments.
-        5. **Debug Mode:** A toggle to view stocks failing constraints (e.g. over budget, negative net profit), colored grey for immediate diagnosis.
+        1. **Strict Positive Yield:** Any trade resulting in `Net Profit <= 0` (after STT, exchange charges, and DP fees) is strictly filtered out.
+        2. **ROTC & Net Profit Ranking:** Trades are ranked by Return on Total Capital (`ROTC (% p.a.)`) and `Net Profit (₹)` in descending order.
+        3. **Bid-Ask Spread Filter:** Reads top depth (`buy[0]` and `sell[0]`). Hides stocks with gaps > ₹0.50 to eliminate execution slippage.
+        4. **Dynamic DTE Rollover:** Auto-switches to next month's futures contract if current month expiry is less than or equal to the specified days away.
+        5. **Dividend Anomaly Warning:** Flags any yield > 25% p.a. as `⚠️ Dividend/Ban Check` to avoid fake price discrepancies caused by corporate action adjustments.
         """)
 
     time.sleep(refresh_interval)
