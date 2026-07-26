@@ -69,9 +69,8 @@ today = now.date()
 curr_month_expiry = get_last_thursday(now.year, now.month)
 curr_dte = (curr_month_expiry - today).days
 
-# UPDATED LOGIC: Trigger rollover if DTE is less than OR EQUAL to cutoff
+# Trigger rollover if DTE is less than OR EQUAL to cutoff
 if curr_dte <= min_dte_cutoff:
-    # Auto-Rollover to Next Month Contract if Expiry is too close
     if now.month == 12:
         target_year, target_month = now.year + 1, 1
     else:
@@ -88,11 +87,11 @@ else:
 year_str = target_dt.strftime("%y")
 curr_month_str = target_dt.strftime("%b").upper()
 
-# Next Month String for MCX Spreads
-if now.month == 12:
-    mcx_next_dt = datetime(now.year + 1, 1, 1)
+# FIX: Next Month String for MCX Spreads (Must be relative to the active target_dt, not 'now')
+if target_dt.month == 12:
+    mcx_next_dt = datetime(target_dt.year + 1, 1, 1)
 else:
-    mcx_next_dt = datetime(now.year, now.month + 1, 1)
+    mcx_next_dt = datetime(target_dt.year, target_dt.month + 1, 1)
 mcx_next_month_str = mcx_next_dt.strftime("%b").upper()
 
 MCX_COMMODITIES = [
@@ -239,7 +238,6 @@ if kite:
                     fut_price = fut_q["last_price"]
                     fut_volume = fut_q.get("volume", 0)
                     
-                    # Extract Order Book Depth for Bid-Ask Spread Check
                     fut_depth = fut_q.get("depth", {})
                     buy_orders = fut_depth.get("buy", [])
                     sell_orders = fut_depth.get("sell", [])
@@ -251,13 +249,11 @@ if kite:
                     else:
                         bid_ask_gap = 0.0
 
-                    # Lot Size & Capital Metrics
                     lot_size = nfo_lot_sizes.get(fut_contract_name, 1000)
                     cash_outlay = cash_price * lot_size
-                    fut_margin = (fut_price * lot_size) * 0.20  # ~20% standard margin requirement
+                    fut_margin = (fut_price * lot_size) * 0.20
                     total_capital_req = cash_outlay + fut_margin
                     
-                    # Compute Profit and Spread
                     abs_spread = fut_price - cash_price
                     
                     total_taxes, net_profit = calculate_arbitrage_net_profit(
@@ -268,21 +264,18 @@ if kite:
                         qty=lot_size
                     )
 
-                    # STRICT RULE: Completely filter out any stock with negative or zero net profit
                     if net_profit <= 0:
                         continue
 
                     annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
                     rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
 
-                    # Evaluate liquidity and execution filters
                     passed_all_filters = (
                         cash_price > 0 and fut_price > 0 and 
                         fut_volume >= min_volume and 
                         bid_ask_gap <= max_bid_ask_spread
                     )
 
-                    # Determine specific status tag
                     if passed_all_filters:
                         if annualized_yield > 25.0:
                             status_tag = "⚠️ Dividend/Ban Check"
@@ -298,12 +291,10 @@ if kite:
                         else:
                             status_tag = "❌ Filtered"
 
-                    # TELEGRAM ALERT
                     if enable_alerts and passed_all_filters and (min_arb_yield <= annualized_yield <= 25.0):
                         msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nROTC: {rotc_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}\nCash Outlay: ₹{cash_outlay:,.0f}"
                         send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
-                    # Append to dataset if passed OR if Debug Mode is ON
                     if passed_all_filters or show_filtered_stocks:
                         arb_data.append({
                             "Symbol": stock,
@@ -326,7 +317,6 @@ if kite:
             df_arb = pd.DataFrame(arb_data)
             
             if not df_arb.empty:
-                # SORTING LOGIC: Best ROTC % p.a. and Highest Net Profit (₹) first; pushed rejected stocks to the bottom
                 df_arb['is_rejected'] = df_arb['Status'].str.contains("❌")
                 df_arb = df_arb.sort_values(
                     by=["is_rejected", "ROTC (% p.a.)", "Net Profit (₹)"], 
@@ -339,7 +329,7 @@ if kite:
                     elif row["Status"] == "⚠️ Dividend/Ban Check":
                         return ['background-color: #4a3800; color: #ffcc00'] * len(row)
                     elif "❌" in row["Status"]:
-                        return ['background-color: #2b2b2b; color: #666666'] * len(row) # Dimmed out for rejected stocks
+                        return ['background-color: #2b2b2b; color: #666666'] * len(row)
                     return [''] * len(row)
 
                 st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
@@ -404,13 +394,39 @@ if kite:
 
     with tab3:
         st.markdown("""
-        ### 📖 Desk A Risk Rules & System Logic
+        ### 📖 Desk A System Logic & Risk Rules
+        
+        This dashboard powers the non-directional yield generation strategy by exploiting pricing inefficiencies between the NSE Equity Cash Market and the NFO Derivatives Market.
+        
+        #### 1. Core Filtration & Ranking Engine
+        * **Strict Positive Net Yield:** Any F&O stock spread that results in a net profit of ₹0 or less is strictly removed from the calculation. You will never see a trade that loses money to taxes.
+        * **ROTC (Return on Total Capital) Sorting:** Trades are sorted by true capital efficiency. The system calculates the exact cash required for the delivery leg + the ~20% SPAN/Exposure margin required for the short futures leg. 
+        * **Bid-Ask Spread Filter:** Fetches live level-2 market depth (`buy[0]` and `sell[0]`). If the gap exceeds the sidebar limit (e.g. ₹0.50), the stock is flagged as unexecutable due to slippage risk.
+        * **Dynamic DTE Rollover:** To protect against Expiry Week physical delivery margins (where exchange requirements spike by 50%), the scanner automatically rolls over to track the *next* month's futures contract when Days to Expiry (DTE) hits the safe threshold.
+        * **Dividend & F&O Ban Flagging:** Any yield artificially bloated above 25% p.a. triggers a `⚠️ Dividend/Ban Check` tag to alert the desk to review corporate actions before execution.
+        * **MCX Dynamic Shift:** The MCX calendar spread engine is strictly pegged to calculate (Far Month - Active Scanner Month), ensuring the spread tracker rolls over seamlessly with the equity module.
 
-        1. **Strict Positive Yield:** Any trade resulting in `Net Profit <= 0` (after STT, exchange charges, and DP fees) is strictly filtered out.
-        2. **ROTC & Net Profit Ranking:** Trades are ranked by Return on Total Capital (`ROTC (% p.a.)`) and `Net Profit (₹)` in descending order.
-        3. **Bid-Ask Spread Filter:** Reads top depth (`buy[0]` and `sell[0]`). Hides stocks with gaps > ₹0.50 to eliminate execution slippage.
-        4. **Dynamic DTE Rollover:** Auto-switches to next month's futures contract if current month expiry is less than or equal to the specified days away.
-        5. **Dividend Anomaly Warning:** Flags any yield > 25% p.a. as `⚠️ Dividend/Ban Check` to avoid fake price discrepancies caused by corporate action adjustments.
+        ---
+
+        ### 🧾 Zerodha Net Profit Tax & Charges Breakdown
+        The internal `calculate_arbitrage_net_profit` function strictly deducts the following exact exchange and regulatory fees to output true, post-tax net profit.
+
+        **A. Equity Cash Leg (Delivery Buy + Sell)**
+        *   **Brokerage:** ₹0
+        *   **STT (Securities Transaction Tax):** 0.1% charged on both Buy and Sell turnover.
+        *   **Exchange Transaction Charge:** 0.00307% (NSE) on both Buy and Sell turnover.
+        *   **Stamp Duty:** 0.015% charged on the Buy side turnover only.
+        *   **SEBI Charges:** ₹10 per crore (0.0001%) on both sides.
+        *   **DP Charge (Depository Participant):** Flat ₹13.5 + 18% GST (₹15.93) deducted once when shares are sold from the demat account.
+        *   **GST:** 18% applied strictly on (Brokerage + Exchange Charges + SEBI Charges).
+
+        **B. Equity Futures Leg (Short Entry + Buy Exit)**
+        *   **Brokerage:** Flat ₹20 per executed order (₹40 total for round trip).
+        *   **STT:** 0.02% charged on the Sell (Short) side turnover only.
+        *   **Exchange Transaction Charge:** 0.00183% (NSE) on both Buy and Sell turnover.
+        *   **Stamp Duty:** 0.002% charged on the Buy (Square-off) side turnover only.
+        *   **SEBI Charges:** ₹10 per crore (0.0001%) on both sides.
+        *   **GST:** 18% applied strictly on (Brokerage + Exchange Charges + SEBI Charges).
         """)
 
     time.sleep(refresh_interval)
