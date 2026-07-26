@@ -43,6 +43,10 @@ max_cash_budget = st.sidebar.number_input("Max Cash Outlay (₹)", value=550000,
 min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=7, value=4, help="Auto-switches to Next Month futures if current month DTE is too low.")
 
 st.sidebar.markdown("---")
+st.sidebar.header("🛠️ System Debugging")
+show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Stocks (Debug Mode)", value=True, help="Shows all stocks and why they were filtered out.")
+
+st.sidebar.markdown("---")
 st.sidebar.header("⛏️ MCX Options")
 min_mcx_spread = st.sidebar.number_input("Min MCX Spread Trigger (₹)", value=5.0, step=0.5)
 
@@ -257,77 +261,93 @@ if kite:
                     fut_margin = (fut_price * lot_size) * 0.20  # ~20% standard margin requirement
                     total_capital_req = cash_outlay + fut_margin
                     
-                    # ==========================================
-                    # APPLY ALL 4 FILTRATION LOGIC RULES
-                    # ==========================================
+                    # Compute Profit and Spread
+                    abs_spread = fut_price - cash_price
                     
-                    # Rule 1 & 2: Volume + Bid-Ask Spread Filter + Budget Constraint
-                    if (cash_price > 0 and fut_price > 0 and 
+                    total_taxes, net_profit = calculate_arbitrage_net_profit(
+                        cash_buy_price=cash_price,
+                        cash_sell_price=fut_price,
+                        fut_sell_price=fut_price,
+                        fut_buy_price=fut_price, 
+                        qty=lot_size
+                    )
+
+                    annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
+                    rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
+
+                    # Evaluate if stock passes all risk/budget filters
+                    passed_all_filters = (
+                        cash_price > 0 and fut_price > 0 and 
                         fut_volume >= min_volume and 
                         bid_ask_gap <= max_bid_ask_spread and 
-                        cash_outlay <= max_cash_budget):
-                        
-                        abs_spread = fut_price - cash_price
-                        
-                        total_taxes, net_profit = calculate_arbitrage_net_profit(
-                            cash_buy_price=cash_price,
-                            cash_sell_price=fut_price,
-                            fut_sell_price=fut_price,
-                            fut_buy_price=fut_price, 
-                            qty=lot_size
-                        )
+                        cash_outlay <= max_cash_budget and
+                        net_profit > 0
+                    )
 
-                        # Rule 3: Strict Positive Net Profit
-                        if net_profit > 0:
-                            annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
-                            rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
+                    # Determine specific status tag
+                    if passed_all_filters:
+                        if annualized_yield > 25.0:
+                            status_tag = "⚠️ Dividend/Ban Check"
+                        elif annualized_yield >= min_arb_yield:
+                            status_tag = "🔥 TARGET HIT"
+                        else:
+                            status_tag = "Normal"
+                    else:
+                        if net_profit <= 0:
+                            status_tag = "❌ Negative Net Profit"
+                        elif cash_outlay > max_cash_budget:
+                            status_tag = "❌ Over Budget"
+                        elif fut_volume < min_volume:
+                            status_tag = "❌ Low Volume"
+                        elif bid_ask_gap > max_bid_ask_spread:
+                            status_tag = "❌ Wide Spread (Slippage)"
+                        else:
+                            status_tag = "❌ Filtered"
 
-                            # Rule 4: Dividend / Anomaly Flagging
-                            if annualized_yield > 25.0:
-                                status_tag = "⚠️ Dividend/Ban Check"
-                            elif annualized_yield >= min_arb_yield:
-                                status_tag = "🔥 TARGET HIT"
-                            else:
-                                status_tag = "Normal"
+                    # TELEGRAM ALERT
+                    if enable_alerts and passed_all_filters and (min_arb_yield <= annualized_yield <= 25.0):
+                        msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nROTC: {rotc_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}\nCash Outlay: ₹{cash_outlay:,.0f}"
+                        send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
-                            if enable_alerts and annualized_yield >= min_arb_yield and annualized_yield <= 25.0:
-                                msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nROTC: {rotc_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}\nCash Outlay: ₹{cash_outlay:,.0f}"
-                                send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
-
-                            arb_data.append({
-                                "Symbol": stock,
-                                "Contract": fut_contract_name,
-                                "Cash Price (₹)": f"{cash_price:.2f}",
-                                "Future Price (₹)": f"{fut_price:.2f}",
-                                "Lot Size": lot_size,
-                                "Cash Outlay (₹)": f"{cash_outlay:,.0f}",
-                                "Total Capital (₹)": f"{total_capital_req:,.0f}",
-                                "Bid-Ask Gap (₹)": bid_ask_gap,
-                                "Volume": fut_volume,
-                                "DTE": active_dte,
-                                "Spread (₹)": round(abs_spread, 2),
-                                "Yield (% p.a.)": round(annualized_yield, 2),
-                                "ROTC (% p.a.)": round(rotc_yield, 2),
-                                "Net Profit (₹)": net_profit,
-                                "Status": status_tag
-                            })
+                    # Only append if passed OR if Debug Mode is ON
+                    if passed_all_filters or show_filtered_stocks:
+                        arb_data.append({
+                            "Symbol": stock,
+                            "Contract": fut_contract_name,
+                            "Cash Price (₹)": f"{cash_price:.2f}",
+                            "Future Price (₹)": f"{fut_price:.2f}",
+                            "Lot Size": lot_size,
+                            "Cash Outlay (₹)": f"{cash_outlay:,.0f}",
+                            "Total Capital (₹)": f"{total_capital_req:,.0f}",
+                            "Bid-Ask Gap (₹)": bid_ask_gap,
+                            "Volume": fut_volume,
+                            "DTE": active_dte,
+                            "Spread (₹)": round(abs_spread, 2),
+                            "Yield (% p.a.)": round(annualized_yield, 2),
+                            "ROTC (% p.a.)": round(rotc_yield, 2),
+                            "Net Profit (₹)": net_profit,
+                            "Status": status_tag
+                        })
 
             df_arb = pd.DataFrame(arb_data)
             
             if not df_arb.empty:
-                # Ranked by ROTC (Return on Total Capital) for maximum budget efficiency
-                df_arb = df_arb.sort_values(by="ROTC (% p.a.)", ascending=False).reset_index(drop=True)
+                # Rank by ROTC, pushing rejected stocks to the bottom
+                df_arb['is_rejected'] = df_arb['Status'].str.contains("❌")
+                df_arb = df_arb.sort_values(by=["is_rejected", "ROTC (% p.a.)"], ascending=[True, False]).drop(columns=['is_rejected']).reset_index(drop=True)
                 
                 def highlight_arb(row):
                     if row["Status"] == "🔥 TARGET HIT":
                         return ['background-color: #1e3d2f; color: #7cfc00'] * len(row)
                     elif row["Status"] == "⚠️ Dividend/Ban Check":
                         return ['background-color: #4a3800; color: #ffcc00'] * len(row)
+                    elif "❌" in row["Status"]:
+                        return ['background-color: #2b2b2b; color: #666666'] * len(row) # Dimmed out for rejected stocks
                     return [''] * len(row)
 
                 st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
             else:
-                st.info("No arbitrage opportunities match all 4 risk filters (Budget, Volume, Bid-Ask Spread, Net Profit) at this time.")
+                st.info("No arbitrage opportunities found. Toggle 'Show Filtered/Rejected Stocks' in the sidebar to see diagnostic data.")
 
         except Exception as e:
             st.error(f"Error processing Cash-Futures data: {e}")
@@ -391,8 +411,9 @@ if kite:
 
         1. **Bid-Ask Spread Filter:** Reads top depth (`buy[0]` and `sell[0]`). Hides stocks with gaps > ₹0.50 to eliminate execution slippage.
         2. **ROTC (Return on Total Capital):** Ranks opportunities by annualized return on combined cash outlay and futures margin requirement.
-        3. **Dynamic DTE Rollover:** Auto-switches to next month's futures contract if current month expiry is less than 4 days away.
+        3. **Dynamic DTE Rollover:** Auto-switches to next month's futures contract if current month expiry is less than the specified days away.
         4. **Dividend Anomaly Warning:** Flags any yield > 25% p.a. as `⚠️ Dividend/Ban Check` to avoid fake price discrepancies caused by corporate action adjustments.
+        5. **Debug Mode:** A toggle to view stocks failing constraints (e.g. over budget, negative net profit), colored grey for immediate diagnosis.
         """)
 
     time.sleep(refresh_interval)
