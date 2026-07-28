@@ -10,13 +10,13 @@ import time
 # 1. PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="Desk A | Real-Time Institutional Scanner",
+    page_title="Desk A | Institutional Curve Scanner",
     page_icon="⚡",
     layout="wide"
 )
 
-st.title("⚡ Desk A: Institutional Cash-Futures & MCX Spread Scanner")
-st.caption("Project Kavya — Proprietary Institutional Research & Execution Dashboard")
+st.title("⚡ Desk A: Institutional Yield & Curve Scanner")
+st.caption("Project Kavya — Proprietary Arbitrage & Calendar Spread Dashboard")
 
 # ==========================================
 # 2. SIDEBAR - ADVANCED CONFIGURATION
@@ -29,10 +29,7 @@ access_token = st.sidebar.text_input("Daily Access Token", type="password", help
 st.sidebar.markdown("---")
 st.sidebar.header("🎯 Target Thresholds & Filters")
 
-# Yield Filters
 min_arb_yield = st.sidebar.slider("Min Cash-Futures Yield (% p.a.)", min_value=2.0, max_value=20.0, value=6.0, step=0.5)
-
-# Expiry Cutoff
 min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=10, value=4, help="Auto-switches to Next Month futures if current month DTE is less than or equal to this.")
 
 st.sidebar.markdown("---")
@@ -51,7 +48,7 @@ telegram_chat_id = st.sidebar.text_input("Chat ID")
 refresh_interval = st.sidebar.slider("Auto-Refresh Rate (Seconds)", min_value=2, max_value=30, value=5)
 
 # ==========================================
-# 3. EXPANDED F&O WATCHLIST CONFIGURATION
+# 3. EXPANDED F&O & CURVE CONFIGURATION
 # ==========================================
 def get_last_thursday(year, month):
     _, last_day = calendar.monthrange(year, month)
@@ -59,34 +56,35 @@ def get_last_thursday(year, month):
     offset = (dt.weekday() - 3) % 7
     return date(year, month, last_day - offset)
 
+def get_target_month(base_date, month_offset):
+    m = base_date.month + month_offset
+    y = base_date.year + (m - 1) // 12
+    m = (m - 1) % 12 + 1
+    expiry = get_last_thursday(y, m)
+    return {
+        "year_str": str(y)[-2:],
+        "month_str": datetime(y, m, 1).strftime("%b").upper(),
+        "expiry_date": expiry,
+        "dte": (expiry - today).days
+    }
+
 now = datetime.now()
 today = now.date()
 
 curr_month_expiry = get_last_thursday(now.year, now.month)
 curr_dte = (curr_month_expiry - today).days
 
+# DTE Auto-Rollover Logic for the "Base" Month (M1)
 if curr_dte <= min_dte_cutoff:
-    if now.month == 12:
-        target_year, target_month = now.year + 1, 1
-    else:
-        target_year, target_month = now.year, now.month + 1
-    active_expiry = get_last_thursday(target_year, target_month)
-    active_dte = (active_expiry - today).days
-    target_dt = datetime(target_year, target_month, 1)
-    st.info(f"📅 **Auto-Rollover Active:** Current month expires in {curr_dte} days. Scanning **{target_dt.strftime('%b').upper()}** contracts.")
+    base_month_offset = 1
+    st.info(f"📅 **Auto-Rollover Active:** Current month expires in {curr_dte} days. Base scanning shifted to next month.")
 else:
-    active_expiry = curr_month_expiry
-    active_dte = curr_dte
-    target_dt = datetime(now.year, now.month, 1)
+    base_month_offset = 0
 
-year_str = target_dt.strftime("%y")
-curr_month_str = target_dt.strftime("%b").upper()
-
-if target_dt.month == 12:
-    mcx_next_dt = datetime(target_dt.year + 1, 1, 1)
-else:
-    mcx_next_dt = datetime(target_dt.year, target_dt.month + 1, 1)
-mcx_next_month_str = mcx_next_dt.strftime("%b").upper()
+# Generate M1 (Near), M2 (Next), M3 (Far) Contracts
+m1 = get_target_month(now, base_month_offset)
+m2 = get_target_month(now, base_month_offset + 1)
+m3 = get_target_month(now, base_month_offset + 2)
 
 MCX_COMMODITIES = [
     "COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL",
@@ -94,62 +92,39 @@ MCX_COMMODITIES = [
     "GOLDGUINEA", "GOLDPETAL", "SILVERMIC"
 ]
 
-CASH_FUT_STOCKS = [
-    "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT", "ADANIPORTS", 
-    "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY", "ASIANPAINT", "ASTRAL", 
-    "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", 
-    "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA", "BATAINDIA", "BEL", "BERGEPAINT", 
-    "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON", "BOSCHLTD", "BPCL", "BRITANNIA", "BSE", 
-    "CANBK", "CANFINHOME", "CHAMBLFERT", "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", 
-    "CONCOR", "COROMANDEL", "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", 
-    "DIVISLAB", "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK", 
-    "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES", "GRASIM", 
-    "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK", "HDFCLIFE", "HEROMOTOCO", 
-    "HINDALCO", "HINDCOPPER", "HINDPETRO", "HINDUNILVR", "ICICIBANK", "ICICIGI", "ICICIPRULI", 
-    "IDEA", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL", "INDIACEM", "INDIAMART", "INDIGO", 
-    "INDUSINDBK", "INFY", "IOC", "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JIOFIN", "JSWSTEEL", 
-    "JUBLFOOD", "KOTAKBANK", "L&TFH", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", 
-    "LTTS", "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCX", "METROPOLIS", 
-    "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN", "NATIONALUM", "NAUKRI", 
-    "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY", "OFSS", "ONGC", "PAGEIND", "PEL", 
-    "PERSISTENT", "PETRONET", "PFC", "PIDILITIND", "PIIND", "PNB", "POLYCAB", "POWERGRID", 
-    "PVRINOX", "RAMCOCEM", "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", 
-    "SHREECEM", "SHRIRAMFIN", "SIEMENS", "SRF", "SUNTV", "SUNPHARMA", "SYNGENE", "TATACHEM", 
-    "TATACOMM", "TATACONSUMER", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM", "TITAN", 
-    "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL", "VOLTAS", "WIPRO", 
-    "ZEEL", "ZYDUSLIFE"
+# Top 100 highly liquid stocks (Permitted for Month 3 Far Curve Scanning)
+TOP_100_STOCKS = [
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "ITC", "LT", "SBIN", "BHARTIARTL", "BAJFINANCE",
+    "KOTAKBANK", "AXISBANK", "ASIANPAINT", "HINDUNILVR", "MARUTI", "SUNPHARMA", "TITAN", "TATASTEEL", 
+    "ULTRACEMCO", "POWERGRID", "NTPC", "TATAMOTORS", "M&M", "JSWSTEEL", "GRASIM", "HCLTECH", "TECHM", 
+    "WIPRO", "ADANIENT", "ADANIPORTS", "TATACONSUMER", "BRITANNIA", "EICHERMOT", "DIVISLAB", "DRREDDY", 
+    "CIPLA", "HEROMOTOCO", "APOLLOHOSP", "HDFCLIFE", "SBILIFE", "INDUSINDBK", "BPCL", "HINDPETRO", 
+    "IOC", "BEL", "HAL", "VEDL", "BHEL", "RECLTD", "PFC", "DLF", "TRENT", "GAIL", "SIEMENS", "ABB", 
+    "CANBK", "BANKBARODA", "CHOLAFIN", "SHRIRAMFIN", "TATACOMM", "COALINDIA", "TVSMOTOR", "AMBUJACEM", 
+    "SHREECEM", "BOSCHLTD", "INDHOTEL", "PIDILITIND", "HAVELLS", "PNB", "ICICIPRULI", "ICICIGI", 
+    "GODREJCP", "DABUR", "COLPAL", "MARICO", "MGL", "IGL", "PETRONET", "LTIM", "OBEROIRLTY", 
+    "GODREJPROP", "AUBANK", "BANDHANBNK", "FEDERALBNK", "IDFCFIRSTB", "MUTHOOTFIN", "MANAPPURAM", 
+    "SAIL", "NMDC", "NATIONALUM", "HINDALCO", "HINDCOPPER", "JINDALSTEL", "TATACHEM", "DEEPAKNTR", 
+    "PIIND", "UPL", "AUROPHARMA", "LUPIN", "TORNTPHARM"
 ]
+
+# Full 180+ F&O Universe (Permitted for Month 1 and Month 2)
+CASH_FUT_STOCKS = list(set(TOP_100_STOCKS + [
+    "AARTIIND", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ALKEM", "APOLLOTYRE", "ASHOKLEY", "ASTRAL", 
+    "ATUL", "BAJAJ-AUTO", "BAJAJFINSV", "BALKRISIND", "BALRAMCHIN", "BATAINDIA", "BERGEPAINT", 
+    "BHARATFORG", "BIOCON", "BSE", "CANFINHOME", "CHAMBLFERT", "COFORGE", "CONCOR", "COROMANDEL", 
+    "CROMPTON", "CUB", "CUMMINSIND", "DALBHARAT", "DIXON", "ESCORTS", "EXIDEIND", "GLENMARK", 
+    "GMRINFRA", "GNFC", "GRANULES", "GUJGASLTD", "HDFCAMC", "IDEA", "IEX", "INDIACEM", "INDIAMART", 
+    "INDIGO", "IPCALAB", "IRCTC", "JIOFIN", "JUBLFOOD", "L&TFH", "LALPATHLAB", "LAURUSLABS", 
+    "LICHSGFIN", "LTTS", "M&MFIN", "MCX", "METROPOLIS", "MFSL", "MOTHERSON", "MPHASIS", "MRF", 
+    "NAUKRI", "NAVINFLUOR", "NESTLEIND", "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "POLYCAB", 
+    "PVRINOX", "RAMCOCEM", "RBLBANK", "SBICARD", "SRF", "SUNTV", "SYNGENE", "TATAPOWER", "UBL", 
+    "VOLTAS", "ZEEL", "ZYDUSLIFE"
+]))
 
 # ==========================================
 # 4. HELPER FUNCTIONS
 # ==========================================
-def send_telegram_alert(message, token, chat_id):
-    if not token or not chat_id:
-        return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload, timeout=3)
-    except Exception:
-        pass
-
-def initialize_kite(key, token):
-    try:
-        kite = KiteConnect(api_key=key)
-        kite.set_access_token(token)
-        return kite
-    except Exception as e:
-        st.error(f"Kite Connection Error: {e}")
-        return None
-
-@st.cache_data(ttl=86400)
-def get_lot_sizes(_kite, exchange):
-    try:
-        instruments = _kite.instruments(exchange)
-        return {item["tradingsymbol"]: item["lot_size"] for item in instruments}
-    except Exception:
-        return {}
-
 def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_price, fut_buy_price, qty):
     cash_buy_val = cash_buy_price * qty
     cash_sell_val = cash_sell_price * qty
@@ -210,289 +185,271 @@ if not access_token:
     st.warning("👈 Please enter today's active Daily Access Token in the sidebar to load the scanner.")
     st.stop()
 
-kite = initialize_kite(api_key, access_token)
+kite = KiteConnect(api_key=api_key)
+kite.set_access_token(access_token)
 
-if kite:
-    nfo_lot_sizes = get_lot_sizes(kite, "NFO")
-    mcx_lot_sizes = get_lot_sizes(kite, "MCX")
+@st.cache_data(ttl=86400)
+def get_lot_sizes(_kite, exchange):
+    try:
+        instruments = _kite.instruments(exchange)
+        return {item["tradingsymbol"]: item["lot_size"] for item in instruments}
+    except Exception:
+        return {}
+
+nfo_lot_sizes = get_lot_sizes(kite, "NFO")
+mcx_lot_sizes = get_lot_sizes(kite, "MCX")
+
+tab1, tab2, tab3 = st.tabs([
+    "📈 Equity Curve Arbitrage", 
+    "⛏️ MCX Curve Spreads", 
+    "📖 Cost Sheet & Logic Docs"
+])
+
+# ------------------------------------------
+# TAB 1: EQUITY CASH-FUTURES ARBITRAGE
+# ------------------------------------------
+with tab1:
+    st.subheader(f"Equity Arbitrage Curve Scanner (Spanning {m1['month_str']} to {m3['month_str']})")
     
-    tab1, tab2, tab3 = st.tabs([
-        "📈 Cash-Futures Arbitrage Board", 
-        "⛏️ MCX Calendar Spreads", 
-        "📖 System & Risk Documentation"
-    ])
-
-    # ------------------------------------------
-    # TAB 1: EQUITY CASH-FUTURES ARBITRAGE
-    # ------------------------------------------
-    with tab1:
-        st.subheader(f"Equity Cash vs. Futures Scanner ({len(CASH_FUT_STOCKS)} Stocks | Expiry: {active_expiry})")
+    symbols_to_quote = []
+    for stock in CASH_FUT_STOCKS:
+        symbols_to_quote.append(f"NSE:{stock}")
+        symbols_to_quote.append(f"NFO:{stock}{m1['year_str']}{m1['month_str']}FUT")
+        symbols_to_quote.append(f"NFO:{stock}{m2['year_str']}{m2['month_str']}FUT")
+        if stock in TOP_100_STOCKS:
+            symbols_to_quote.append(f"NFO:{stock}{m3['year_str']}{m3['month_str']}FUT")
         
-        symbols_to_quote = []
+    try:
+        quotes = {}
+        for chunk in chunk_list(symbols_to_quote, 400):
+            quotes.update(kite.quote(chunk))
+            
+        arb_data = []
+
         for stock in CASH_FUT_STOCKS:
             cash_sym = f"NSE:{stock}"
-            fut_sym = f"NFO:{stock}{year_str}{curr_month_str}FUT"
-            symbols_to_quote.extend([cash_sym, fut_sym])
-            
-        try:
-            quotes = {}
-            for chunk in chunk_list(symbols_to_quote, 400):
-                quotes.update(kite.quote(chunk))
-                
-            arb_data = []
+            cash_q = quotes.get(cash_sym)
+            if not cash_q: continue
+            cash_price = cash_q["last_price"]
+            if cash_price <= 0: continue
 
-            for stock in CASH_FUT_STOCKS:
-                cash_sym = f"NSE:{stock}"
-                fut_contract_name = f"{stock}{year_str}{curr_month_str}FUT"
+            # Evaluate Curve: Month 1, Month 2, Month 3
+            curve_months = [(1, m1), (2, m2)]
+            if stock in TOP_100_STOCKS:
+                curve_months.append((3, m3))
+
+            for month_gap, m_data in curve_months:
+                fut_contract_name = f"{stock}{m_data['year_str']}{m_data['month_str']}FUT"
                 fut_sym = f"NFO:{fut_contract_name}"
-
-                cash_q = quotes.get(cash_sym)
                 fut_q = quotes.get(fut_sym)
 
-                if cash_q and fut_q:
-                    cash_price = cash_q["last_price"]
+                if fut_q and fut_q["last_price"] > 0:
                     fut_price = fut_q["last_price"]
-
                     lot_size = nfo_lot_sizes.get(fut_contract_name, 1000)
+                    
                     cash_outlay = cash_price * lot_size
                     fut_margin = (fut_price * lot_size) * 0.20
                     total_capital_req = cash_outlay + fut_margin
                     
                     abs_spread = fut_price - cash_price
-                    
                     gross_profit, total_taxes, net_profit = calculate_arbitrage_net_profit(
-                        cash_buy_price=cash_price,
-                        cash_sell_price=fut_price,
-                        fut_sell_price=fut_price,
-                        fut_buy_price=fut_price, 
-                        qty=lot_size
+                        cash_buy_price=cash_price, cash_sell_price=fut_price,
+                        fut_sell_price=fut_price, fut_buy_price=fut_price, qty=lot_size
                     )
 
                     if net_profit <= 0:
                         continue
 
-                    annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
-                    rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
+                    annualized_yield = ((abs_spread / cash_price) * (365 / max(m_data['dte'], 1))) * 100
+                    rotc_yield = ((net_profit / total_capital_req) * (365 / max(m_data['dte'], 1))) * 100
 
-                    passed_all_filters = (cash_price > 0 and fut_price > 0)
-
-                    if passed_all_filters:
-                        if annualized_yield > 25.0:
-                            status_tag = "⚠️ Dividend/Ban Check"
-                        elif annualized_yield >= min_arb_yield:
-                            status_tag = "🔥 TARGET HIT"
-                        else:
-                            status_tag = "Normal"
+                    if annualized_yield > 25.0:
+                        status_tag = "⚠️ Dividend/Ban Check"
+                    elif annualized_yield >= min_arb_yield:
+                        status_tag = "🔥 TARGET HIT"
                     else:
-                        status_tag = "❌ Filtered"
+                        status_tag = "Normal"
 
-                    if enable_alerts and passed_all_filters and (min_arb_yield <= annualized_yield <= 25.0):
-                        msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}"
-                        send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
-
-                    if passed_all_filters or show_filtered_stocks:
+                    if show_filtered_stocks or status_tag != "Normal":
                         arb_data.append({
                             "Symbol": stock,
-                            "Contract": fut_contract_name,
-                            "Cash Price (₹)": f"{cash_price:.2f}",
-                            "Future Price (₹)": f"{fut_price:.2f}",
-                            "Lot Size": lot_size,
-                            "Total Capital (₹)": f"{total_capital_req:,.0f}",
-                            "DTE": active_dte,
-                            "Spread (₹)": round(abs_spread, 2),
+                            "Buy Leg": f"NSE Cash",
+                            "Sell Leg": f"{m_data['month_str']} FUT",
+                            "Gap": f"{month_gap} Mo.",
+                            "DTE": m_data['dte'],
+                            "Cash Price": f"₹{cash_price:.2f}",
+                            "Future Price": f"₹{fut_price:.2f}",
+                            "Capital Req": f"₹{total_capital_req:,.0f}",
+                            "Spread": f"₹{abs_spread:.2f}",
                             "Yield (% p.a.)": round(annualized_yield, 2),
                             "ROTC (% p.a.)": round(rotc_yield, 2),
-                            "Gross Profit (₹)": gross_profit,
-                            "Total Charges (₹)": total_taxes,
-                            "Net Profit (₹)": net_profit,
+                            "Gross Profit": f"₹{gross_profit:,.0f}",
+                            "Taxes": f"₹{total_taxes:,.0f}",
+                            "Net Profit": net_profit,
                             "Status": status_tag
                         })
 
-            df_arb = pd.DataFrame(arb_data)
-            
-            if not df_arb.empty:
-                df_arb['is_rejected'] = df_arb['Status'].str.contains("❌")
-                df_arb = df_arb.sort_values(
-                    by=["is_rejected", "ROTC (% p.a.)", "Net Profit (₹)"], 
-                    ascending=[True, False, False]
-                ).drop(columns=['is_rejected']).reset_index(drop=True)
-                
-                def highlight_arb(row):
-                    if row["Status"] == "🔥 TARGET HIT":
-                        return ['background-color: #1e3d2f; color: #7cfc00'] * len(row)
-                    elif row["Status"] == "⚠️ Dividend/Ban Check":
-                        return ['background-color: #4a3800; color: #ffcc00'] * len(row)
-                    elif "❌" in row["Status"]:
-                        return ['background-color: #2b2b2b; color: #666666'] * len(row)
-                    return [''] * len(row)
-
-                st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
-            else:
-                st.info("No positive-yield arbitrage opportunities found. Zero and negative net return stocks have been filtered out.")
-
-            # EQUITY STATUS LEGENDS
-            st.markdown("---")
-            st.markdown("### 🏷️ Status Legend (Equity)")
-            st.caption("""
-            * **🔥 TARGET HIT:** The trade exceeds your minimum required annualized yield and generates positive net profit after all exchange taxes.
-            * **⚠️ Dividend/Ban Check:** Yield is abnormally high (>25%). This usually indicates an upcoming dividend (which drops the futures price artificially) or the stock is in an F&O ban. Do not trade without verifying corporate actions.
-            * **Normal:** The trade is profitable, but the yield is currently below your sidebar target.
-            """)
-
-        except Exception as e:
-            st.error(f"Error processing Cash-Futures data: {e}")
-
-    # ------------------------------------------
-    # TAB 2: MCX COMMODITY CALENDAR SPREADS
-    # ------------------------------------------
-    with tab2:
-        st.subheader("All MCX Commodity Calendar Spread Scanner")
+        df_arb = pd.DataFrame(arb_data)
         
-        mcx_symbols = []
+        if not df_arb.empty:
+            df_arb = df_arb.sort_values(by=["Yield (% p.a.)", "Net Profit"], ascending=[False, False]).reset_index(drop=True)
+            
+            def highlight_arb(row):
+                if row["Status"] == "🔥 TARGET HIT": return ['background-color: #1e3d2f; color: #7cfc00'] * len(row)
+                elif row["Status"] == "⚠️ Dividend/Ban Check": return ['background-color: #4a3800; color: #ffcc00'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(df_arb.style.apply(highlight_arb, axis=1), use_container_width=True)
+        else:
+            st.info("No positive-yield arbitrage opportunities found on the curve.")
+
+    except Exception as e:
+        st.error(f"Error processing Equity Curve data: {e}")
+
+# ------------------------------------------
+# TAB 2: MCX COMMODITY CALENDAR SPREADS
+# ------------------------------------------
+with tab2:
+    st.subheader("MCX Commodity Multi-Month Curve Scanner")
+    
+    mcx_symbols = []
+    for metal in MCX_COMMODITIES:
+        mcx_symbols.append(f"MCX:{metal}{m1['year_str']}{m1['month_str']}FUT")
+        mcx_symbols.append(f"MCX:{metal}{m2['year_str']}{m2['month_str']}FUT")
+        mcx_symbols.append(f"MCX:{metal}{m3['year_str']}{m3['month_str']}FUT")
+
+    try:
+        mcx_quotes = kite.quote(mcx_symbols)
+        spread_data = []
+
         for metal in MCX_COMMODITIES:
-            near_sym = f"MCX:{metal}{year_str}{curr_month_str}FUT"
-            far_sym = f"MCX:{metal}{year_str}{mcx_next_month_str}FUT"
-            mcx_symbols.extend([near_sym, far_sym])
+            # Construct combinations: (M1, M2 - 1mo gap), (M1, M3 - 2mo gap), (M2, M3 - 1mo gap)
+            pairs = [
+                (m1, m2, "1 Mo."),
+                (m1, m3, "2 Mo."),
+                (m2, m3, "1 Mo.")
+            ]
+            
+            for leg1, leg2, gap_label in pairs:
+                leg1_name = f"{metal}{leg1['year_str']}{leg1['month_str']}FUT"
+                leg2_name = f"{metal}{leg2['year_str']}{leg2['month_str']}FUT"
+                
+                q1 = mcx_quotes.get(f"MCX:{leg1_name}")
+                q2 = mcx_quotes.get(f"MCX:{leg2_name}")
 
-        try:
-            mcx_quotes = kite.quote(mcx_symbols)
-            spread_data = []
-
-            for metal in MCX_COMMODITIES:
-                near_contract_name = f"{metal}{year_str}{curr_month_str}FUT"
-                far_contract_name = f"{metal}{year_str}{mcx_next_month_str}FUT"
-                near_sym = f"MCX:{near_contract_name}"
-                far_sym = f"MCX:{far_contract_name}"
-
-                near_q = mcx_quotes.get(near_sym)
-                far_q = mcx_quotes.get(far_sym)
-
-                if near_q and far_q:
-                    near_price = near_q["last_price"]
-                    far_price = far_q["last_price"]
+                if q1 and q2 and q1["last_price"] > 0 and q2["last_price"] > 0:
+                    p1 = q1["last_price"]
+                    p2 = q2["last_price"]
                     
-                    lot_size = mcx_lot_sizes.get(near_contract_name, 1)
-                    total_capital_req = (near_price * lot_size) * 0.10  
+                    lot_size = mcx_lot_sizes.get(leg1_name, 1)
+                    total_capital_req = (p1 * lot_size) * 0.10  
                     
-                    # REVERSE ARBITRAGE LOGIC IMPLEMENTED
-                    action = "Buy Near, Short Far" if far_price >= near_price else "Short Near, Buy Far"
-                    abs_spread = abs(far_price - near_price)
+                    # Reverse Arbitrage Logic
+                    action = "Buy Near, Short Far" if p2 >= p1 else "Short Near, Buy Far"
                     
-                    gross_profit, total_taxes, net_profit = calculate_mcx_spread_net_profit(near_price, far_price, lot_size)
-
-                    annualized_yield = ((abs_spread / near_price) * (365 / max(active_dte, 1))) * 100
-                    rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
-
-                    passed_all_filters = (near_price > 0 and far_price > 0)
-
-                    if passed_all_filters:
-                        if net_profit <= 0:
-                            status_tag = "Loss Making (Monitor)"
-                        elif annualized_yield >= min_mcx_yield:
-                            status_tag = "🔥 TARGET HIT"
-                        else:
-                            status_tag = "Normal"
+                    # Contract name assignments for display
+                    if p2 >= p1:
+                        buy_leg = leg1['month_str']
+                        sell_leg = leg2['month_str']
                     else:
-                        status_tag = "❌ Filtered"
+                        buy_leg = leg2['month_str']
+                        sell_leg = leg1['month_str']
 
-                    if enable_alerts and passed_all_filters and (annualized_yield >= min_mcx_yield) and net_profit > 0:
-                        msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nSpread: ₹{abs_spread:.2f}\nNet Profit: ₹{net_profit}\nROTC: {rotc_yield:.2f}%"
-                        send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
+                    abs_spread = abs(p2 - p1)
+                    gross_profit, total_taxes, net_profit = calculate_mcx_spread_net_profit(p1, p2, lot_size)
 
-                    if passed_all_filters or show_filtered_stocks:
+                    # Days held = DTE of the near leg
+                    days_held = max(leg1['dte'], 1)
+                    annualized_yield = ((abs_spread / p1) * (365 / days_held)) * 100
+                    rotc_yield = ((net_profit / total_capital_req) * (365 / days_held)) * 100
+
+                    if net_profit <= 0:
+                        status_tag = "Loss Making (Monitor)"
+                    elif annualized_yield >= min_mcx_yield:
+                        status_tag = "🔥 TARGET HIT"
+                    else:
+                        status_tag = "Normal"
+
+                    if show_filtered_stocks or status_tag == "🔥 TARGET HIT":
                         spread_data.append({
                             "Commodity": metal,
                             "Action": action,
-                            "Near Price (₹)": f"{near_price:.2f}",
-                            "Far Price (₹)": f"{far_price:.2f}",
-                            "Lot Size": lot_size,
-                            "Est. Margin (₹)": f"{total_capital_req:,.0f}",
-                            "Spread (₹)": round(abs_spread, 2),
+                            "Buy Leg": f"{buy_leg} FUT",
+                            "Sell Leg": f"{sell_leg} FUT",
+                            "Gap": gap_label,
+                            "Leg 1 Price": f"₹{p1:.2f}",
+                            "Leg 2 Price": f"₹{p2:.2f}",
+                            "Margin": f"₹{total_capital_req:,.0f}",
+                            "Spread": f"₹{abs_spread:.2f}",
                             "Yield (% p.a.)": round(annualized_yield, 2),
                             "ROTC (% p.a.)": round(rotc_yield, 2),
-                            "Gross Profit (₹)": gross_profit,
-                            "Total Charges (₹)": total_taxes,
-                            "Net Profit (₹)": net_profit,
+                            "Gross Profit": f"₹{gross_profit:,.0f}",
+                            "Taxes": f"₹{total_taxes:,.0f}",
+                            "Net Profit": net_profit,
                             "Status": status_tag
                         })
 
-            df_spread = pd.DataFrame(spread_data)
+        df_spread = pd.DataFrame(spread_data)
+        
+        if not df_spread.empty:
+            df_spread['is_rejected'] = df_spread['Status'].str.contains("Loss Making")
+            df_spread = df_spread.sort_values(by=["is_rejected", "Yield (% p.a.)"], ascending=[True, False]).drop(columns=['is_rejected']).reset_index(drop=True)
             
-            if not df_spread.empty:
-                df_spread['is_rejected'] = df_spread['Status'].str.contains("❌")
-                df_spread = df_spread.sort_values(
-                    by=["is_rejected", "Net Profit (₹)"], 
-                    ascending=[True, False]
-                ).drop(columns=['is_rejected']).reset_index(drop=True)
-                
-                def highlight_spread(row):
-                    if row["Status"] == "🔥 TARGET HIT":
-                        return ['background-color: #3b2d18; color: #ffd700'] * len(row)
-                    elif row["Status"] == "Loss Making (Monitor)":
-                        return ['color: #ff6666'] * len(row)
-                    elif "❌" in row["Status"]:
-                        return ['background-color: #2b2b2b; color: #666666'] * len(row)
-                    return [''] * len(row)
+            def highlight_spread(row):
+                if row["Status"] == "🔥 TARGET HIT": return ['background-color: #3b2d18; color: #ffd700'] * len(row)
+                elif row["Status"] == "Loss Making (Monitor)": return ['color: #ff6666'] * len(row)
+                return [''] * len(row)
 
-                st.dataframe(df_spread.style.apply(highlight_spread, axis=1), use_container_width=True)
-            else:
-                st.info("No MCX spreads available.")
+            st.dataframe(df_spread.style.apply(highlight_spread, axis=1), use_container_width=True)
+        else:
+            st.info("No MCX spreads available.")
 
-            # MCX STATUS LEGENDS
-            st.markdown("---")
-            st.markdown("### 🏷️ Status Legend (MCX)")
-            st.caption("""
-            * **🔥 TARGET HIT:** Spread yield is high and generates positive net profit after all exchange taxes.
-            * **Loss Making (Monitor):** The price gap between the two months is currently so small that paying brokerages and CTT will result in a net loss. Keep it on the board to monitor when it widens.
-            * **Normal:** The spread is profitable, but the annualized yield is currently below your sidebar target.
-            """)
+    except Exception as e:
+        st.error(f"Error fetching MCX data: {e}")
 
-        except Exception as e:
-            st.error(f"Error fetching MCX data: {e}")
+# ------------------------------------------
+# TAB 3: COST SHEET & DOCUMENTATION
+# ------------------------------------------
+with tab3:
+    st.markdown("""
+    ### 📖 Desk A: Trading Cost Sheet & Execution Logic
+    
+    This documentation outlines the mathematical assumptions and precise regulatory taxation schedules programmed into the scanner to calculate true Net Profit across multi-month curves.
+    
+    ---
 
-    # ------------------------------------------
-    # TAB 3: SYSTEM LOGIC & DOCUMENTATION
-    # ------------------------------------------
-    with tab3:
-        st.markdown("""
-        ### 📖 Commodities & Equities Cost Sheet and Formulas
-        
-        This proprietary documentation outlines the exact mathematical assumptions and regulatory taxation schedules programmed into the scanner to calculate true Net Profit.
-        
-        ---
+    #### 1. Curve Execution Strategy
+    
+    *   **Equity Curve Constraints:** The scanner tracks arbitrage opportunities 1, 2, and 3 months into the future. Because liquidity drops significantly in far-month contracts, **Month 3 trades are strictly restricted to the Top 100 most liquid F&O stocks** (e.g., Reliance, HDFC, Infosys) to prevent execution slippage.
+    *   **MCX Curve Constraints:** The scanner looks at near, next, and far month combinations. Gold and Silver often skip months natively on MCX (bi-monthly cycles). The system dynamically evaluates Contango and Backwardation to explicitly issue the correct Buy and Sell leg assignments.
+    *   **Capital Allocation (ROTC):** 
+        *   *Equity:* Requires 100% upfront capital for the cash delivery leg, plus an assumed ~20% SPAN/Exposure margin for the short future leg.
+        *   *Commodity:* Assumes exchange-mandated calendar spread margin benefits, requiring roughly ~10% of the near contract's value.
 
-        #### 1. Fundamental Execution Assumptions
-        
-        *   **Equity Convergence:** The equity engine assumes the trade is held exactly to expiry. Upon expiry, the futures price converges perfectly with the cash price. The `Net Profit` generated assumes you exit both legs simultaneously at this convergent price.
-        *   **Commodity Reversal/Convergence:** The MCX engine tracks calendar spreads dynamically. It issues an explicit action ("Buy Near, Short Far" for Contango, or "Short Near, Buy Far" for Backwardation). It assumes both legs are squared off simultaneously before physical tender rules apply.
-        *   **Capital Allocation (ROTC):** 
-            *   *Equity:* Requires 100% upfront capital for the cash delivery leg, plus an assumed ~20% SPAN/Exposure margin for the short future leg.
-            *   *Commodity:* Assumes exchange-mandated calendar spread margin benefits, requiring roughly ~10% combined margin.
+    ---
 
-        ---
+    #### 2. Net Profit Calculation Formulas
+    
+    **Equity Net Profit (Cash vs Future)**
+    $$ \\text{Net Profit} = [(\\text{Future}_{Entry} - \\text{Cash}_{Entry}) \\times \\text{Lot Size}] - (\\text{Total Cash Charges} + \\text{Total Future Charges}) $$
 
-        #### 2. Net Profit Calculation Formulas
-        
-        **Equity Net Profit**
-        $$ \\text{Net Profit} = [(\\text{Future}_{Entry} - \\text{Cash}_{Entry}) \\times \\text{Lot Size}] - (\\text{Total Cash Charges} + \\text{Total Future Charges}) $$
+    **Commodities Net Profit (Calendar Spread)**
+    $$ \\text{Net Profit} = [|\\text{Far}_{Entry} - \\text{Near}_{Entry}| \\times \\text{Lot Size}] - (\\text{Total MCX Charges}) $$
 
-        **Commodities Net Profit**
-        $$ \\text{Net Profit} = [|\\text{Far}_{Entry} - \\text{Near}_{Entry}| \\times \\text{Lot Size}] - (\\text{Total MCX Charges}) $$
+    ---
 
-        ---
+    #### 3. Brokerage & Regulatory Cost Sheet (Zerodha 2026)
 
-        #### 3. Brokerage & Regulatory Cost Sheet (Zerodha 2026)
+    | Charge Type | Equity Cash (Delivery) | Equity Futures (NFO) | Commodity Futures (MCX) |
+    | :--- | :--- | :--- | :--- |
+    | **Brokerage** | ₹0 | ₹40 (Round Trip) | ₹80 (4-Leg Calendar Round Trip) |
+    | **STT / CTT** | 0.1% (Buy & Sell) | 0.02% (Sell Side Only) | 0.01% CTT (Sell Side Only) |
+    | **Exchange Txn** | 0.00307% | 0.00183% | ~0.0021% |
+    | **Stamp Duty** | 0.015% (Buy Side Only) | 0.002% (Buy Side Only) | 0.002% (Buy Side Only) |
+    | **SEBI Charges** | ₹10 per Crore | ₹10 per Crore | ₹10 per Crore |
+    | **DP Charge** | ₹15.93 (Flat, on exit) | Not Applicable | Not Applicable |
+    | **GST** | 18% on (Brokerage + SEBI + Txn) | 18% on (Brokerage + SEBI + Txn) | 18% on (Brokerage + SEBI + Txn) |
+    """)
 
-        | Charge Type | Equity Cash (Delivery) | Equity Futures (NFO) | Commodity Futures (MCX) |
-        | :--- | :--- | :--- | :--- |
-        | **Brokerage** | ₹0 | ₹40 (Round Trip) | ₹80 (4-Leg Calendar Round Trip) |
-        | **STT / CTT** | 0.1% (Buy & Sell) | 0.02% (Sell Side Only) | 0.01% CTT (Sell Side Only) |
-        | **Exchange Txn** | 0.00307% | 0.00183% | ~0.0021% |
-        | **Stamp Duty** | 0.015% (Buy Side Only) | 0.002% (Buy Side Only) | 0.002% (Buy Side Only) |
-        | **SEBI Charges** | ₹10 per Crore | ₹10 per Crore | ₹10 per Crore |
-        | **DP Charge** | ₹15.93 (Flat, on exit) | Not Applicable | Not Applicable |
-        | **GST** | 18% on (Brokerage + SEBI + Txn) | 18% on (Brokerage + SEBI + Txn) | 18% on (Brokerage + SEBI + Txn) |
-        """)
-
-    time.sleep(refresh_interval)
-    st.rerun()
+time.sleep(refresh_interval)
+st.rerun()
