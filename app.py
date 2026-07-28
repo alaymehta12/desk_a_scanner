@@ -56,7 +56,6 @@ refresh_interval = st.sidebar.slider("Auto-Refresh Rate (Seconds)", min_value=2,
 # 3. EXPANDED F&O WATCHLIST CONFIGURATION
 # ==========================================
 def get_last_thursday(year, month):
-    """Calculates the exact date of the last Thursday for any given month/year (NSE Expiry)."""
     _, last_day = calendar.monthrange(year, month)
     dt = date(year, month, last_day)
     offset = (dt.weekday() - 3) % 7
@@ -65,11 +64,9 @@ def get_last_thursday(year, month):
 now = datetime.now()
 today = now.date()
 
-# Dynamic Contract Month Selection (Current vs. Next Month)
 curr_month_expiry = get_last_thursday(now.year, now.month)
 curr_dte = (curr_month_expiry - today).days
 
-# Trigger rollover if DTE is less than OR EQUAL to cutoff
 if curr_dte <= min_dte_cutoff:
     if now.month == 12:
         target_year, target_month = now.year + 1, 1
@@ -87,7 +84,6 @@ else:
 year_str = target_dt.strftime("%y")
 curr_month_str = target_dt.strftime("%b").upper()
 
-# Next Month String for MCX Spreads
 if target_dt.month == 12:
     mcx_next_dt = datetime(target_dt.year + 1, 1, 1)
 else:
@@ -157,7 +153,6 @@ def get_lot_sizes(_kite, exchange):
         return {}
 
 def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_price, fut_buy_price, qty):
-    """Calculates NSE Equity Cash-Futures Arbitrage exact taxes"""
     cash_buy_val = cash_buy_price * qty
     cash_sell_val = cash_sell_price * qty
     cash_turnover = cash_buy_val + cash_sell_val
@@ -188,21 +183,21 @@ def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_pri
     return round(gross_profit, 2), round(total_charges, 2), round(net_profit, 2)
 
 def calculate_mcx_spread_net_profit(near_price, far_price, qty):
-    """Calculates MCX Calendar Spread exact taxes (Assuming Buy Near, Sell Far for turnover calculation)"""
     buy_turnover = (near_price + far_price) * qty
     sell_turnover = (near_price + far_price) * qty
     total_turnover = buy_turnover + sell_turnover
 
-    mcx_brokerage = 80.0  # ₹20 entry + ₹20 exit per leg
-    mcx_ctt = sell_turnover * 0.0001  # 0.01% CTT applied ONLY on the Sell side
-    mcx_exc_txn = total_turnover * 0.000021  # MCX Txn Charge ~0.0021%
-    mcx_stamp = buy_turnover * 0.00002  # 0.002% Stamp Duty on Buy side
+    mcx_brokerage = 80.0 
+    mcx_ctt = sell_turnover * 0.0001
+    mcx_exc_txn = total_turnover * 0.000021
+    mcx_stamp = buy_turnover * 0.00002
     mcx_sebi = total_turnover * 0.000001  
     mcx_gst = (mcx_brokerage + mcx_exc_txn + mcx_sebi) * 0.18 
     
     total_charges = mcx_brokerage + mcx_ctt + mcx_exc_txn + mcx_stamp + mcx_sebi + mcx_gst
     
-    gross_profit = (far_price - near_price) * qty
+    # Absolute difference captures both Contango and Backwardation profit scenarios
+    gross_profit = abs(far_price - near_price) * qty
     net_profit = gross_profit - total_charges
     
     return round(gross_profit, 2), round(total_charges, 2), round(net_profit, 2)
@@ -361,6 +356,17 @@ if kite:
             else:
                 st.info("No positive-yield arbitrage opportunities found. Zero and negative net return stocks have been filtered out.")
 
+            # EQUITY STATUS LEGENDS
+            st.markdown("---")
+            st.markdown("### 🏷️ Status Legend (Equity)")
+            st.caption("""
+            * **🔥 TARGET HIT:** The trade passes all liquidity filters and exceeds your minimum required annualized yield. Ready to execute.
+            * **⚠️ Dividend/Ban Check:** Yield is abnormally high (>25%). This usually indicates an upcoming dividend (which drops the futures price artificially) or the stock is in an F&O ban. Do not trade without verifying corporate actions.
+            * **Normal:** The trade is profitable, but the yield is currently below your sidebar target.
+            * **❌ Low Volume:** Traded volume is too low today. Entering this trade carries high slippage risk.
+            * **❌ Wide Spread (Slippage):** The gap between buyers and sellers in the order book exceeds your maximum allowed limit.
+            """)
+
         except Exception as e:
             st.error(f"Error processing Cash-Futures data: {e}")
 
@@ -406,9 +412,11 @@ if kite:
                         bid_ask_gap = 0.0
 
                     lot_size = mcx_lot_sizes.get(near_contract_name, 1)
-                    total_capital_req = (near_price * lot_size) * 0.10  # ~10% MCX margin assumption
+                    total_capital_req = (near_price * lot_size) * 0.10  
                     
-                    abs_spread = far_price - near_price
+                    # REVERSE ARBITRAGE LOGIC IMPLEMENTED
+                    action = "Buy Near, Short Far" if far_price >= near_price else "Short Near, Buy Far"
+                    abs_spread = abs(far_price - near_price)
                     
                     gross_profit, total_taxes, net_profit = calculate_mcx_spread_net_profit(near_price, far_price, lot_size)
 
@@ -421,8 +429,6 @@ if kite:
                         bid_ask_gap <= max_bid_ask_spread
                     )
 
-                    # Negative net profits are NO LONGER filtered out for MCX. 
-                    # If it fails volume or bid-ask constraints, it gets marked with an "❌" for debugging.
                     if passed_all_filters:
                         if net_profit <= 0:
                             status_tag = "Loss Making (Monitor)"
@@ -445,15 +451,16 @@ if kite:
                     if passed_all_filters or show_filtered_stocks:
                         spread_data.append({
                             "Commodity": metal,
-                            "Near Contract": near_contract_name,
-                            "Far Contract": far_contract_name,
+                            "Action": action,
                             "Near Price (₹)": f"{near_price:.2f}",
                             "Far Price (₹)": f"{far_price:.2f}",
                             "Lot Size": lot_size,
                             "Est. Margin (₹)": f"{total_capital_req:,.0f}",
                             "Bid-Ask Gap (₹)": bid_ask_gap,
-                            "Volume (Near)": near_volume,
+                            "Volume": near_volume,
                             "Spread (₹)": round(abs_spread, 2),
+                            "Yield (% p.a.)": round(annualized_yield, 2),
+                            "ROTC (% p.a.)": round(rotc_yield, 2),
                             "Gross Profit (₹)": gross_profit,
                             "Total Charges (₹)": total_taxes,
                             "Net Profit (₹)": net_profit,
@@ -482,6 +489,17 @@ if kite:
             else:
                 st.info("No MCX spreads available.")
 
+            # MCX STATUS LEGENDS
+            st.markdown("---")
+            st.markdown("### 🏷️ Status Legend (MCX)")
+            st.caption("""
+            * **🔥 TARGET HIT:** Spread yield is high, volume is good, and it passes all execution constraints.
+            * **Loss Making (Monitor):** The price gap between the two months is currently so small that paying brokerages and CTT will result in a net loss. Keep it on the board to monitor when it widens.
+            * **Normal:** The spread is profitable, but the annualized yield is currently below your sidebar target.
+            * **❌ Low Volume:** Traded volume is too low today. Entering this trade carries high slippage risk.
+            * **❌ Wide Spread (Slippage):** The gap between buyers and sellers in the order book exceeds your maximum allowed limit.
+            """)
+
         except Exception as e:
             st.error(f"Error fetching MCX data: {e}")
 
@@ -496,6 +514,7 @@ if kite:
         
         #### 1. Core Filtration & Ranking Engine
         * **Equity Filtration:** Any spread in the Equity module that results in a net profit of ₹0 or less is strictly removed. 
+        * **MCX Reverse Arbitrage:** MCX logic dynamically calculates whether the market is in Contango or Backwardation and issues explicit action orders ("Buy Near, Short Far" or "Short Near, Buy Far") to capture yield regardless of market direction.
         * **MCX Monitoring:** Negative net profit trades are intentionally kept visible on the MCX board to allow the desk to monitor spread compression and expansion leading up to favorable setups.
         * **Cost Breakdown:** Both boards now explicitly detail the Gross Profit and Total Charges to maintain strict oversight on taxation drag.
         * **Bid-Ask Spread Filter:** Fetches live level-2 market depth (`buy[0]` and `sell[0]`). If the gap exceeds the sidebar limit, the instrument is flagged as unexecutable to prevent execution slippage traps.
