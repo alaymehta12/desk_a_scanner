@@ -88,7 +88,7 @@ m3 = get_target_month(now, base_month_offset + 2)
 
 MCX_COMMODITIES = [
     "COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL",
-    "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "MENTHAOIL",
+    "GOLD", "SILVER", "CRUDEOILM", "NATURALGAS", "MENTHAOIL",
     "GOLDGUINEA", "GOLDPETAL", "SILVERMIC"
 ]
 
