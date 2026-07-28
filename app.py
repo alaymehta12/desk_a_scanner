@@ -29,10 +29,8 @@ access_token = st.sidebar.text_input("Daily Access Token", type="password", help
 st.sidebar.markdown("---")
 st.sidebar.header("🎯 Target Thresholds & Filters")
 
-# Yield & Liquidity Filters
+# Yield Filters
 min_arb_yield = st.sidebar.slider("Min Cash-Futures Yield (% p.a.)", min_value=2.0, max_value=20.0, value=6.0, step=0.5)
-min_volume = st.sidebar.number_input("Min Futures Volume", value=100000, step=50000, help="Filters out illiquid futures contracts.")
-max_bid_ask_spread = st.sidebar.number_input("Max Bid-Ask Spread (₹)", value=0.50, step=0.05, help="Maximum gap between top Bid and Ask allowed in order book.")
 
 # Expiry Cutoff
 min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=10, value=4, help="Auto-switches to Next Month futures if current month DTE is less than or equal to this.")
@@ -43,7 +41,7 @@ min_mcx_yield = st.sidebar.slider("Min MCX Spread Yield (% p.a.)", min_value=2.0
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ System Debugging")
-show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Trades", value=True, help="Shows trades failing volume/spread constraints.")
+show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Trades", value=True, help="Shows trades failing yield constraints.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔔 Telegram Push Alerts")
@@ -196,7 +194,6 @@ def calculate_mcx_spread_net_profit(near_price, far_price, qty):
     
     total_charges = mcx_brokerage + mcx_ctt + mcx_exc_txn + mcx_stamp + mcx_sebi + mcx_gst
     
-    # Absolute difference captures both Contango and Backwardation profit scenarios
     gross_profit = abs(far_price - near_price) * qty
     net_profit = gross_profit - total_charges
     
@@ -255,18 +252,6 @@ if kite:
                 if cash_q and fut_q:
                     cash_price = cash_q["last_price"]
                     fut_price = fut_q["last_price"]
-                    fut_volume = fut_q.get("volume", 0)
-                    
-                    fut_depth = fut_q.get("depth", {})
-                    buy_orders = fut_depth.get("buy", [])
-                    sell_orders = fut_depth.get("sell", [])
-                    
-                    if buy_orders and sell_orders:
-                        top_bid = buy_orders[0].get("price", 0)
-                        top_ask = sell_orders[0].get("price", 0)
-                        bid_ask_gap = round(top_ask - top_bid, 2) if (top_ask > 0 and top_bid > 0) else 0.0
-                    else:
-                        bid_ask_gap = 0.0
 
                     lot_size = nfo_lot_sizes.get(fut_contract_name, 1000)
                     cash_outlay = cash_price * lot_size
@@ -289,11 +274,7 @@ if kite:
                     annualized_yield = ((abs_spread / cash_price) * (365 / max(active_dte, 1))) * 100
                     rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
 
-                    passed_all_filters = (
-                        cash_price > 0 and fut_price > 0 and 
-                        fut_volume >= min_volume and 
-                        bid_ask_gap <= max_bid_ask_spread
-                    )
+                    passed_all_filters = (cash_price > 0 and fut_price > 0)
 
                     if passed_all_filters:
                         if annualized_yield > 25.0:
@@ -303,12 +284,7 @@ if kite:
                         else:
                             status_tag = "Normal"
                     else:
-                        if fut_volume < min_volume:
-                            status_tag = "❌ Low Volume"
-                        elif bid_ask_gap > max_bid_ask_spread:
-                            status_tag = "❌ Wide Spread (Slippage)"
-                        else:
-                            status_tag = "❌ Filtered"
+                        status_tag = "❌ Filtered"
 
                     if enable_alerts and passed_all_filters and (min_arb_yield <= annualized_yield <= 25.0):
                         msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}"
@@ -322,8 +298,6 @@ if kite:
                             "Future Price (₹)": f"{fut_price:.2f}",
                             "Lot Size": lot_size,
                             "Total Capital (₹)": f"{total_capital_req:,.0f}",
-                            "Bid-Ask Gap (₹)": bid_ask_gap,
-                            "Volume": fut_volume,
                             "DTE": active_dte,
                             "Spread (₹)": round(abs_spread, 2),
                             "Yield (% p.a.)": round(annualized_yield, 2),
@@ -360,11 +334,9 @@ if kite:
             st.markdown("---")
             st.markdown("### 🏷️ Status Legend (Equity)")
             st.caption("""
-            * **🔥 TARGET HIT:** The trade passes all liquidity filters and exceeds your minimum required annualized yield. Ready to execute.
+            * **🔥 TARGET HIT:** The trade exceeds your minimum required annualized yield and generates positive net profit after all exchange taxes.
             * **⚠️ Dividend/Ban Check:** Yield is abnormally high (>25%). This usually indicates an upcoming dividend (which drops the futures price artificially) or the stock is in an F&O ban. Do not trade without verifying corporate actions.
             * **Normal:** The trade is profitable, but the yield is currently below your sidebar target.
-            * **❌ Low Volume:** Traded volume is too low today. Entering this trade carries high slippage risk.
-            * **❌ Wide Spread (Slippage):** The gap between buyers and sellers in the order book exceeds your maximum allowed limit.
             """)
 
         except Exception as e:
@@ -398,19 +370,7 @@ if kite:
                 if near_q and far_q:
                     near_price = near_q["last_price"]
                     far_price = far_q["last_price"]
-                    near_volume = near_q.get("volume", 0)
                     
-                    near_depth = near_q.get("depth", {})
-                    buy_orders = near_depth.get("buy", [])
-                    sell_orders = near_depth.get("sell", [])
-                    
-                    if buy_orders and sell_orders:
-                        top_bid = buy_orders[0].get("price", 0)
-                        top_ask = sell_orders[0].get("price", 0)
-                        bid_ask_gap = round(top_ask - top_bid, 2) if (top_ask > 0 and top_bid > 0) else 0.0
-                    else:
-                        bid_ask_gap = 0.0
-
                     lot_size = mcx_lot_sizes.get(near_contract_name, 1)
                     total_capital_req = (near_price * lot_size) * 0.10  
                     
@@ -423,11 +383,7 @@ if kite:
                     annualized_yield = ((abs_spread / near_price) * (365 / max(active_dte, 1))) * 100
                     rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
 
-                    passed_all_filters = (
-                        near_price > 0 and far_price > 0 and 
-                        near_volume >= min_volume and 
-                        bid_ask_gap <= max_bid_ask_spread
-                    )
+                    passed_all_filters = (near_price > 0 and far_price > 0)
 
                     if passed_all_filters:
                         if net_profit <= 0:
@@ -437,12 +393,7 @@ if kite:
                         else:
                             status_tag = "Normal"
                     else:
-                        if near_volume < min_volume:
-                            status_tag = "❌ Low Volume"
-                        elif bid_ask_gap > max_bid_ask_spread:
-                            status_tag = "❌ Wide Spread (Slippage)"
-                        else:
-                            status_tag = "❌ Filtered"
+                        status_tag = "❌ Filtered"
 
                     if enable_alerts and passed_all_filters and (annualized_yield >= min_mcx_yield) and net_profit > 0:
                         msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nSpread: ₹{abs_spread:.2f}\nNet Profit: ₹{net_profit}\nROTC: {rotc_yield:.2f}%"
@@ -456,8 +407,6 @@ if kite:
                             "Far Price (₹)": f"{far_price:.2f}",
                             "Lot Size": lot_size,
                             "Est. Margin (₹)": f"{total_capital_req:,.0f}",
-                            "Bid-Ask Gap (₹)": bid_ask_gap,
-                            "Volume": near_volume,
                             "Spread (₹)": round(abs_spread, 2),
                             "Yield (% p.a.)": round(annualized_yield, 2),
                             "ROTC (% p.a.)": round(rotc_yield, 2),
@@ -493,11 +442,9 @@ if kite:
             st.markdown("---")
             st.markdown("### 🏷️ Status Legend (MCX)")
             st.caption("""
-            * **🔥 TARGET HIT:** Spread yield is high, volume is good, and it passes all execution constraints.
+            * **🔥 TARGET HIT:** Spread yield is high and generates positive net profit after all exchange taxes.
             * **Loss Making (Monitor):** The price gap between the two months is currently so small that paying brokerages and CTT will result in a net loss. Keep it on the board to monitor when it widens.
             * **Normal:** The spread is profitable, but the annualized yield is currently below your sidebar target.
-            * **❌ Low Volume:** Traded volume is too low today. Entering this trade carries high slippage risk.
-            * **❌ Wide Spread (Slippage):** The gap between buyers and sellers in the order book exceeds your maximum allowed limit.
             """)
 
         except Exception as e:
@@ -508,34 +455,43 @@ if kite:
     # ------------------------------------------
     with tab3:
         st.markdown("""
-        ### 📖 Desk A System Logic & Risk Rules
+        ### 📖 Commodities & Equities Cost Sheet and Formulas
         
-        This dashboard powers the non-directional yield generation strategy across both NSE Equities and MCX Commodities.
+        This proprietary documentation outlines the exact mathematical assumptions and regulatory taxation schedules programmed into the scanner to calculate true Net Profit.
         
-        #### 1. Core Filtration & Ranking Engine
-        * **Equity Filtration:** Any spread in the Equity module that results in a net profit of ₹0 or less is strictly removed. 
-        * **MCX Reverse Arbitrage:** MCX logic dynamically calculates whether the market is in Contango or Backwardation and issues explicit action orders ("Buy Near, Short Far" or "Short Near, Buy Far") to capture yield regardless of market direction.
-        * **MCX Monitoring:** Negative net profit trades are intentionally kept visible on the MCX board to allow the desk to monitor spread compression and expansion leading up to favorable setups.
-        * **Cost Breakdown:** Both boards now explicitly detail the Gross Profit and Total Charges to maintain strict oversight on taxation drag.
-        * **Bid-Ask Spread Filter:** Fetches live level-2 market depth (`buy[0]` and `sell[0]`). If the gap exceeds the sidebar limit, the instrument is flagged as unexecutable to prevent execution slippage traps.
+        ---
+
+        #### 1. Fundamental Execution Assumptions
+        
+        *   **Equity Convergence:** The equity engine assumes the trade is held exactly to expiry. Upon expiry, the futures price converges perfectly with the cash price. The `Net Profit` generated assumes you exit both legs simultaneously at this convergent price.
+        *   **Commodity Reversal/Convergence:** The MCX engine tracks calendar spreads dynamically. It issues an explicit action ("Buy Near, Short Far" for Contango, or "Short Near, Buy Far" for Backwardation). It assumes both legs are squared off simultaneously before physical tender rules apply.
+        *   **Capital Allocation (ROTC):** 
+            *   *Equity:* Requires 100% upfront capital for the cash delivery leg, plus an assumed ~20% SPAN/Exposure margin for the short future leg.
+            *   *Commodity:* Assumes exchange-mandated calendar spread margin benefits, requiring roughly ~10% combined margin.
 
         ---
 
-        ### 🧾 Zerodha Net Profit Tax & Charges Breakdown
+        #### 2. Net Profit Calculation Formulas
+        
+        **Equity Net Profit**
+        $$ \\text{Net Profit} = [(\\text{Future}_{Entry} - \\text{Cash}_{Entry}) \\times \\text{Lot Size}] - (\\text{Total Cash Charges} + \\text{Total Future Charges}) $$
 
-        **A. Equity Arbitrage (Delivery Leg + Future Leg)**
-        *   **STT:** 0.1% on Equity Delivery (Buy & Sell) + 0.02% on Short Future (Sell only).
-        *   **Brokerage:** ₹0 for Equity CNC + ₹40 round-trip for NRML Future.
-        *   **Exchange Txn:** 0.00307% (NSE Cash) + 0.00183% (NSE F&O).
-        *   **DP Charge:** Flat ₹15.93 deducted once when demat shares are sold.
-        *   **GST:** 18% applied on (Brokerage + Exchange Charges + SEBI).
+        **Commodities Net Profit**
+        $$ \\text{Net Profit} = [|\\text{Far}_{Entry} - \\text{Near}_{Entry}| \\times \\text{Lot Size}] - (\\text{Total MCX Charges}) $$
 
-        **B. MCX Calendar Spread (Near Leg + Far Leg)**
-        *   **CTT (Commodity Transaction Tax):** 0.01% applied exclusively on the Sell side turnover of both the near and far leg.
-        *   **Brokerage:** Flat ₹20 per executed order = ₹80 total for the 4-leg round trip.
-        *   **Exchange Txn Charge:** ~0.0021% applied to the total turnover of all legs.
-        *   **Stamp Duty:** 0.002% charged on the Buy side turnover only.
-        *   **GST:** 18% applied strictly on (Brokerage + Exchange Charges + SEBI Charges).
+        ---
+
+        #### 3. Brokerage & Regulatory Cost Sheet (Zerodha 2026)
+
+        | Charge Type | Equity Cash (Delivery) | Equity Futures (NFO) | Commodity Futures (MCX) |
+        | :--- | :--- | :--- | :--- |
+        | **Brokerage** | ₹0 | ₹40 (Round Trip) | ₹80 (4-Leg Calendar Round Trip) |
+        | **STT / CTT** | 0.1% (Buy & Sell) | 0.02% (Sell Side Only) | 0.01% CTT (Sell Side Only) |
+        | **Exchange Txn** | 0.00307% | 0.00183% | ~0.0021% |
+        | **Stamp Duty** | 0.015% (Buy Side Only) | 0.002% (Buy Side Only) | 0.002% (Buy Side Only) |
+        | **SEBI Charges** | ₹10 per Crore | ₹10 per Crore | ₹10 per Crore |
+        | **DP Charge** | ₹15.93 (Flat, on exit) | Not Applicable | Not Applicable |
+        | **GST** | 18% on (Brokerage + SEBI + Txn) | 18% on (Brokerage + SEBI + Txn) | 18% on (Brokerage + SEBI + Txn) |
         """)
 
     time.sleep(refresh_interval)
