@@ -43,7 +43,7 @@ min_mcx_yield = st.sidebar.slider("Min MCX Spread Yield (% p.a.)", min_value=2.0
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ System Debugging")
-show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Trades", value=True, help="Shows trades failing volume/spread constraints (Negative return trades are ALWAYS hidden).")
+show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Trades", value=True, help="Shows trades failing volume/spread constraints.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔔 Telegram Push Alerts")
@@ -87,7 +87,7 @@ else:
 year_str = target_dt.strftime("%y")
 curr_month_str = target_dt.strftime("%b").upper()
 
-# Next Month String for MCX Spreads (Must be relative to the active target_dt)
+# Next Month String for MCX Spreads
 if target_dt.month == 12:
     mcx_next_dt = datetime(target_dt.year + 1, 1, 1)
 else:
@@ -96,7 +96,8 @@ mcx_next_month_str = mcx_next_dt.strftime("%b").upper()
 
 MCX_COMMODITIES = [
     "COPPER", "ZINC", "ALUMINIUM", "LEAD", "NICKEL",
-    "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "MENTHAOIL"
+    "GOLD", "SILVER", "CRUDEOIL", "NATURALGAS", "MENTHAOIL",
+    "GOLDGUINEA", "GOLDPETAL", "SILVERMIC"
 ]
 
 CASH_FUT_STOCKS = [
@@ -184,29 +185,27 @@ def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_pri
     total_charges = total_cash_charges + total_fut_charges
     net_profit = gross_profit - total_charges
     
-    return round(total_charges, 2), round(net_profit, 2)
+    return round(gross_profit, 2), round(total_charges, 2), round(net_profit, 2)
 
 def calculate_mcx_spread_net_profit(near_price, far_price, qty):
     """Calculates MCX Calendar Spread exact taxes (Assuming Buy Near, Sell Far for turnover calculation)"""
-    # Assuming exit prices converge exactly to compute standard round-trip turnover
     buy_turnover = (near_price + far_price) * qty
     sell_turnover = (near_price + far_price) * qty
     total_turnover = buy_turnover + sell_turnover
 
-    mcx_brokerage = 80.0  # ₹20 entry + ₹20 exit per leg = ₹80 total for 4 legs
+    mcx_brokerage = 80.0  # ₹20 entry + ₹20 exit per leg
     mcx_ctt = sell_turnover * 0.0001  # 0.01% CTT applied ONLY on the Sell side
     mcx_exc_txn = total_turnover * 0.000021  # MCX Txn Charge ~0.0021%
-    mcx_stamp = buy_turnover * 0.00002  # 0.002% Stamp Duty on Buy side only
+    mcx_stamp = buy_turnover * 0.00002  # 0.002% Stamp Duty on Buy side
     mcx_sebi = total_turnover * 0.000001  
     mcx_gst = (mcx_brokerage + mcx_exc_txn + mcx_sebi) * 0.18 
     
     total_charges = mcx_brokerage + mcx_ctt + mcx_exc_txn + mcx_stamp + mcx_sebi + mcx_gst
     
-    # Gross Profit = (Far Price - Near Price) * Lot Size
     gross_profit = (far_price - near_price) * qty
     net_profit = gross_profit - total_charges
     
-    return round(total_charges, 2), round(net_profit, 2)
+    return round(gross_profit, 2), round(total_charges, 2), round(net_profit, 2)
 
 def chunk_list(lst, n):
     for i in range(0, len(lst), n):
@@ -281,7 +280,7 @@ if kite:
                     
                     abs_spread = fut_price - cash_price
                     
-                    total_taxes, net_profit = calculate_arbitrage_net_profit(
+                    gross_profit, total_taxes, net_profit = calculate_arbitrage_net_profit(
                         cash_buy_price=cash_price,
                         cash_sell_price=fut_price,
                         fut_sell_price=fut_price,
@@ -327,7 +326,6 @@ if kite:
                             "Cash Price (₹)": f"{cash_price:.2f}",
                             "Future Price (₹)": f"{fut_price:.2f}",
                             "Lot Size": lot_size,
-                            "Cash Outlay (₹)": f"{cash_outlay:,.0f}",
                             "Total Capital (₹)": f"{total_capital_req:,.0f}",
                             "Bid-Ask Gap (₹)": bid_ask_gap,
                             "Volume": fut_volume,
@@ -335,6 +333,8 @@ if kite:
                             "Spread (₹)": round(abs_spread, 2),
                             "Yield (% p.a.)": round(annualized_yield, 2),
                             "ROTC (% p.a.)": round(rotc_yield, 2),
+                            "Gross Profit (₹)": gross_profit,
+                            "Total Charges (₹)": total_taxes,
                             "Net Profit (₹)": net_profit,
                             "Status": status_tag
                         })
@@ -394,7 +394,6 @@ if kite:
                     far_price = far_q["last_price"]
                     near_volume = near_q.get("volume", 0)
                     
-                    # Order Book Depth for MCX (Using Near Contract)
                     near_depth = near_q.get("depth", {})
                     buy_orders = near_depth.get("buy", [])
                     sell_orders = near_depth.get("sell", [])
@@ -407,18 +406,12 @@ if kite:
                         bid_ask_gap = 0.0
 
                     lot_size = mcx_lot_sizes.get(near_contract_name, 1)
-                    
-                    # Assume ~10% required margin for Calendar Spread execution on Zerodha
-                    total_capital_req = (near_price * lot_size) * 0.10  
+                    total_capital_req = (near_price * lot_size) * 0.10  # ~10% MCX margin assumption
                     
                     abs_spread = far_price - near_price
                     
-                    total_taxes, net_profit = calculate_mcx_spread_net_profit(near_price, far_price, lot_size)
+                    gross_profit, total_taxes, net_profit = calculate_mcx_spread_net_profit(near_price, far_price, lot_size)
 
-                    if net_profit <= 0:
-                        continue
-
-                    # MCX Annualized Yield Logic
                     annualized_yield = ((abs_spread / near_price) * (365 / max(active_dte, 1))) * 100
                     rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
 
@@ -428,8 +421,12 @@ if kite:
                         bid_ask_gap <= max_bid_ask_spread
                     )
 
+                    # Negative net profits are NO LONGER filtered out for MCX. 
+                    # If it fails volume or bid-ask constraints, it gets marked with an "❌" for debugging.
                     if passed_all_filters:
-                        if annualized_yield >= min_mcx_yield:
+                        if net_profit <= 0:
+                            status_tag = "Loss Making (Monitor)"
+                        elif annualized_yield >= min_mcx_yield:
                             status_tag = "🔥 TARGET HIT"
                         else:
                             status_tag = "Normal"
@@ -441,7 +438,7 @@ if kite:
                         else:
                             status_tag = "❌ Filtered"
 
-                    if enable_alerts and passed_all_filters and (annualized_yield >= min_mcx_yield):
+                    if enable_alerts and passed_all_filters and (annualized_yield >= min_mcx_yield) and net_profit > 0:
                         msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nSpread: ₹{abs_spread:.2f}\nNet Profit: ₹{net_profit}\nROTC: {rotc_yield:.2f}%"
                         send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
@@ -457,8 +454,8 @@ if kite:
                             "Bid-Ask Gap (₹)": bid_ask_gap,
                             "Volume (Near)": near_volume,
                             "Spread (₹)": round(abs_spread, 2),
-                            "Yield (% p.a.)": round(annualized_yield, 2),
-                            "ROTC (% p.a.)": round(rotc_yield, 2),
+                            "Gross Profit (₹)": gross_profit,
+                            "Total Charges (₹)": total_taxes,
                             "Net Profit (₹)": net_profit,
                             "Status": status_tag
                         })
@@ -468,20 +465,22 @@ if kite:
             if not df_spread.empty:
                 df_spread['is_rejected'] = df_spread['Status'].str.contains("❌")
                 df_spread = df_spread.sort_values(
-                    by=["is_rejected", "ROTC (% p.a.)", "Net Profit (₹)"], 
-                    ascending=[True, False, False]
+                    by=["is_rejected", "Net Profit (₹)"], 
+                    ascending=[True, False]
                 ).drop(columns=['is_rejected']).reset_index(drop=True)
                 
                 def highlight_spread(row):
                     if row["Status"] == "🔥 TARGET HIT":
                         return ['background-color: #3b2d18; color: #ffd700'] * len(row)
+                    elif row["Status"] == "Loss Making (Monitor)":
+                        return ['color: #ff6666'] * len(row)
                     elif "❌" in row["Status"]:
                         return ['background-color: #2b2b2b; color: #666666'] * len(row)
                     return [''] * len(row)
 
                 st.dataframe(df_spread.style.apply(highlight_spread, axis=1), use_container_width=True)
             else:
-                st.info("No positive-yield MCX spread opportunities found. Zero and negative net return spreads have been filtered out.")
+                st.info("No MCX spreads available.")
 
         except Exception as e:
             st.error(f"Error fetching MCX data: {e}")
@@ -496,15 +495,14 @@ if kite:
         This dashboard powers the non-directional yield generation strategy across both NSE Equities and MCX Commodities.
         
         #### 1. Core Filtration & Ranking Engine
-        * **Strict Positive Net Yield:** Any spread (NSE or MCX) that results in a net profit of ₹0 or less is strictly removed from the calculation. You will never see a trade that loses money to taxes.
-        * **ROTC (Return on Total Capital) Sorting:** Trades are sorted by true capital efficiency. Equity ROTC assumes full delivery cash + ~20% future margin. MCX ROTC assumes a standard ~10% calendar spread margin execution block.
+        * **Equity Filtration:** Any spread in the Equity module that results in a net profit of ₹0 or less is strictly removed. 
+        * **MCX Monitoring:** Negative net profit trades are intentionally kept visible on the MCX board to allow the desk to monitor spread compression and expansion leading up to favorable setups.
+        * **Cost Breakdown:** Both boards now explicitly detail the Gross Profit and Total Charges to maintain strict oversight on taxation drag.
         * **Bid-Ask Spread Filter:** Fetches live level-2 market depth (`buy[0]` and `sell[0]`). If the gap exceeds the sidebar limit, the instrument is flagged as unexecutable to prevent execution slippage traps.
-        * **Dynamic MCX Tender Warning:** Because commodities require physical warehousing delivery, calendar spreads must be squared off manually *before* the tender period begins (usually 5 days prior to MCX expiry). 
 
         ---
 
         ### 🧾 Zerodha Net Profit Tax & Charges Breakdown
-        The internal calculation functions strictly deduct the exact exchange and regulatory fees to output true, post-tax net profit.
 
         **A. Equity Arbitrage (Delivery Leg + Future Leg)**
         *   **STT:** 0.1% on Equity Delivery (Buy & Sell) + 0.02% on Short Future (Sell only).
