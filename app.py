@@ -38,12 +38,12 @@ max_bid_ask_spread = st.sidebar.number_input("Max Bid-Ask Spread (₹)", value=0
 min_dte_cutoff = st.sidebar.slider("Min DTE Before Auto-Rollover (Days)", min_value=1, max_value=10, value=4, help="Auto-switches to Next Month futures if current month DTE is less than or equal to this.")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🛠️ System Debugging")
-show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Stocks (Debug Mode)", value=True, help="Shows stocks failing volume/spread constraints (Negative return stocks are ALWAYS hidden).")
+st.sidebar.header("⛏️ MCX Specific Filters")
+min_mcx_yield = st.sidebar.slider("Min MCX Spread Yield (% p.a.)", min_value=2.0, max_value=20.0, value=6.0, step=0.5)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⛏️ MCX Options")
-min_mcx_spread = st.sidebar.number_input("Min MCX Spread Trigger (₹)", value=5.0, step=0.5)
+st.sidebar.header("🛠️ System Debugging")
+show_filtered_stocks = st.sidebar.checkbox("Show Filtered/Rejected Trades", value=True, help="Shows trades failing volume/spread constraints (Negative return trades are ALWAYS hidden).")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔔 Telegram Push Alerts")
@@ -78,7 +78,7 @@ if curr_dte <= min_dte_cutoff:
     active_expiry = get_last_thursday(target_year, target_month)
     active_dte = (active_expiry - today).days
     target_dt = datetime(target_year, target_month, 1)
-    st.info(f"📅 **Auto-Rollover Active:** Current month expires in {curr_dte} days. Scanning **{target_dt.strftime('%b').upper()}** contract (Expiry: {active_expiry}, DTE: {active_dte} days).")
+    st.info(f"📅 **Auto-Rollover Active:** Current month expires in {curr_dte} days. Scanning **{target_dt.strftime('%b').upper()}** contracts.")
 else:
     active_expiry = curr_month_expiry
     active_dte = curr_dte
@@ -87,7 +87,7 @@ else:
 year_str = target_dt.strftime("%y")
 curr_month_str = target_dt.strftime("%b").upper()
 
-# FIX: Next Month String for MCX Spreads (Must be relative to the active target_dt, not 'now')
+# Next Month String for MCX Spreads (Must be relative to the active target_dt)
 if target_dt.month == 12:
     mcx_next_dt = datetime(target_dt.year + 1, 1, 1)
 else:
@@ -156,7 +156,7 @@ def get_lot_sizes(_kite, exchange):
         return {}
 
 def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_price, fut_buy_price, qty):
-    # CASH LEG CHARGES
+    """Calculates NSE Equity Cash-Futures Arbitrage exact taxes"""
     cash_buy_val = cash_buy_price * qty
     cash_sell_val = cash_sell_price * qty
     cash_turnover = cash_buy_val + cash_sell_val
@@ -169,7 +169,6 @@ def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_pri
     cash_dp = 15.93
     total_cash_charges = cash_brokerage + cash_stt + cash_exc_txn + cash_stamp + cash_sebi + cash_gst + cash_dp
     
-    # FUTURES LEG CHARGES
     fut_sell_val = fut_sell_price * qty
     fut_buy_val = fut_buy_price * qty 
     fut_turnover = fut_sell_val + fut_buy_val
@@ -183,6 +182,28 @@ def calculate_arbitrage_net_profit(cash_buy_price, cash_sell_price, fut_sell_pri
     
     gross_profit = (cash_sell_val - cash_buy_val) + (fut_sell_val - fut_buy_val)
     total_charges = total_cash_charges + total_fut_charges
+    net_profit = gross_profit - total_charges
+    
+    return round(total_charges, 2), round(net_profit, 2)
+
+def calculate_mcx_spread_net_profit(near_price, far_price, qty):
+    """Calculates MCX Calendar Spread exact taxes (Assuming Buy Near, Sell Far for turnover calculation)"""
+    # Assuming exit prices converge exactly to compute standard round-trip turnover
+    buy_turnover = (near_price + far_price) * qty
+    sell_turnover = (near_price + far_price) * qty
+    total_turnover = buy_turnover + sell_turnover
+
+    mcx_brokerage = 80.0  # ₹20 entry + ₹20 exit per leg = ₹80 total for 4 legs
+    mcx_ctt = sell_turnover * 0.0001  # 0.01% CTT applied ONLY on the Sell side
+    mcx_exc_txn = total_turnover * 0.000021  # MCX Txn Charge ~0.0021%
+    mcx_stamp = buy_turnover * 0.00002  # 0.002% Stamp Duty on Buy side only
+    mcx_sebi = total_turnover * 0.000001  
+    mcx_gst = (mcx_brokerage + mcx_exc_txn + mcx_sebi) * 0.18 
+    
+    total_charges = mcx_brokerage + mcx_ctt + mcx_exc_txn + mcx_stamp + mcx_sebi + mcx_gst
+    
+    # Gross Profit = (Far Price - Near Price) * Lot Size
+    gross_profit = (far_price - near_price) * qty
     net_profit = gross_profit - total_charges
     
     return round(total_charges, 2), round(net_profit, 2)
@@ -202,6 +223,7 @@ kite = initialize_kite(api_key, access_token)
 
 if kite:
     nfo_lot_sizes = get_lot_sizes(kite, "NFO")
+    mcx_lot_sizes = get_lot_sizes(kite, "MCX")
     
     tab1, tab2, tab3 = st.tabs([
         "📈 Cash-Futures Arbitrage Board", 
@@ -209,6 +231,9 @@ if kite:
         "📖 System & Risk Documentation"
     ])
 
+    # ------------------------------------------
+    # TAB 1: EQUITY CASH-FUTURES ARBITRAGE
+    # ------------------------------------------
     with tab1:
         st.subheader(f"Equity Cash vs. Futures Scanner ({len(CASH_FUT_STOCKS)} Stocks | Expiry: {active_expiry})")
         
@@ -292,7 +317,7 @@ if kite:
                             status_tag = "❌ Filtered"
 
                     if enable_alerts and passed_all_filters and (min_arb_yield <= annualized_yield <= 25.0):
-                        msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nROTC: {rotc_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}\nCash Outlay: ₹{cash_outlay:,.0f}"
+                        msg = f"🚨 *ARBITRAGE ALERT: {stock}*\nYield: {annualized_yield:.2f}% p.a.\nNet Profit: ₹{net_profit}"
                         send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
                     if passed_all_filters or show_filtered_stocks:
@@ -339,6 +364,9 @@ if kite:
         except Exception as e:
             st.error(f"Error processing Cash-Futures data: {e}")
 
+    # ------------------------------------------
+    # TAB 2: MCX COMMODITY CALENDAR SPREADS
+    # ------------------------------------------
     with tab2:
         st.subheader("All MCX Commodity Calendar Spread Scanner")
         
@@ -364,68 +392,132 @@ if kite:
                 if near_q and far_q:
                     near_price = near_q["last_price"]
                     far_price = far_q["last_price"]
-                    spread = far_price - near_price
+                    near_volume = near_q.get("volume", 0)
+                    
+                    # Order Book Depth for MCX (Using Near Contract)
+                    near_depth = near_q.get("depth", {})
+                    buy_orders = near_depth.get("buy", [])
+                    sell_orders = near_depth.get("sell", [])
+                    
+                    if buy_orders and sell_orders:
+                        top_bid = buy_orders[0].get("price", 0)
+                        top_ask = sell_orders[0].get("price", 0)
+                        bid_ask_gap = round(top_ask - top_bid, 2) if (top_ask > 0 and top_bid > 0) else 0.0
+                    else:
+                        bid_ask_gap = 0.0
 
-                    if enable_alerts and abs(spread) >= min_mcx_spread:
-                        msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nNear: {near_price}\nFar: {far_price}\nSpread: ₹{spread:.2f}"
+                    lot_size = mcx_lot_sizes.get(near_contract_name, 1)
+                    
+                    # Assume ~10% required margin for Calendar Spread execution on Zerodha
+                    total_capital_req = (near_price * lot_size) * 0.10  
+                    
+                    abs_spread = far_price - near_price
+                    
+                    total_taxes, net_profit = calculate_mcx_spread_net_profit(near_price, far_price, lot_size)
+
+                    if net_profit <= 0:
+                        continue
+
+                    # MCX Annualized Yield Logic
+                    annualized_yield = ((abs_spread / near_price) * (365 / max(active_dte, 1))) * 100
+                    rotc_yield = ((net_profit / total_capital_req) * (365 / max(active_dte, 1))) * 100
+
+                    passed_all_filters = (
+                        near_price > 0 and far_price > 0 and 
+                        near_volume >= min_volume and 
+                        bid_ask_gap <= max_bid_ask_spread
+                    )
+
+                    if passed_all_filters:
+                        if annualized_yield >= min_mcx_yield:
+                            status_tag = "🔥 TARGET HIT"
+                        else:
+                            status_tag = "Normal"
+                    else:
+                        if near_volume < min_volume:
+                            status_tag = "❌ Low Volume"
+                        elif bid_ask_gap > max_bid_ask_spread:
+                            status_tag = "❌ Wide Spread (Slippage)"
+                        else:
+                            status_tag = "❌ Filtered"
+
+                    if enable_alerts and passed_all_filters and (annualized_yield >= min_mcx_yield):
+                        msg = f"🚨 *MCX SPREAD ALERT: {metal}*\nSpread: ₹{abs_spread:.2f}\nNet Profit: ₹{net_profit}\nROTC: {rotc_yield:.2f}%"
                         send_telegram_alert(msg, telegram_bot_token, telegram_chat_id)
 
-                    spread_data.append({
-                        "Commodity": metal,
-                        "Near Contract": near_contract_name,
-                        "Far Contract": far_contract_name,
-                        "Near Price (₹)": f"{near_price:.2f}",
-                        "Far Price (₹)": f"{far_price:.2f}",
-                        "Spread (Far - Near) ₹": round(spread, 2),
-                        "Status": "⚡ WIDE SPREAD" if abs(spread) >= min_mcx_spread else "Normal"
-                    })
+                    if passed_all_filters or show_filtered_stocks:
+                        spread_data.append({
+                            "Commodity": metal,
+                            "Near Contract": near_contract_name,
+                            "Far Contract": far_contract_name,
+                            "Near Price (₹)": f"{near_price:.2f}",
+                            "Far Price (₹)": f"{far_price:.2f}",
+                            "Lot Size": lot_size,
+                            "Est. Margin (₹)": f"{total_capital_req:,.0f}",
+                            "Bid-Ask Gap (₹)": bid_ask_gap,
+                            "Volume (Near)": near_volume,
+                            "Spread (₹)": round(abs_spread, 2),
+                            "Yield (% p.a.)": round(annualized_yield, 2),
+                            "ROTC (% p.a.)": round(rotc_yield, 2),
+                            "Net Profit (₹)": net_profit,
+                            "Status": status_tag
+                        })
 
             df_spread = pd.DataFrame(spread_data)
             
-            def highlight_spread(row):
-                if abs(row["Spread (Far - Near) ₹"]) >= min_mcx_spread:
-                    return ['background-color: #3b2d18; color: #ffd700'] * len(row)
-                return [''] * len(row)
+            if not df_spread.empty:
+                df_spread['is_rejected'] = df_spread['Status'].str.contains("❌")
+                df_spread = df_spread.sort_values(
+                    by=["is_rejected", "ROTC (% p.a.)", "Net Profit (₹)"], 
+                    ascending=[True, False, False]
+                ).drop(columns=['is_rejected']).reset_index(drop=True)
+                
+                def highlight_spread(row):
+                    if row["Status"] == "🔥 TARGET HIT":
+                        return ['background-color: #3b2d18; color: #ffd700'] * len(row)
+                    elif "❌" in row["Status"]:
+                        return ['background-color: #2b2b2b; color: #666666'] * len(row)
+                    return [''] * len(row)
 
-            st.dataframe(df_spread.style.apply(highlight_spread, axis=1), use_container_width=True)
+                st.dataframe(df_spread.style.apply(highlight_spread, axis=1), use_container_width=True)
+            else:
+                st.info("No positive-yield MCX spread opportunities found. Zero and negative net return spreads have been filtered out.")
 
         except Exception as e:
             st.error(f"Error fetching MCX data: {e}")
 
+    # ------------------------------------------
+    # TAB 3: SYSTEM LOGIC & DOCUMENTATION
+    # ------------------------------------------
     with tab3:
         st.markdown("""
         ### 📖 Desk A System Logic & Risk Rules
         
-        This dashboard powers the non-directional yield generation strategy by exploiting pricing inefficiencies between the NSE Equity Cash Market and the NFO Derivatives Market.
+        This dashboard powers the non-directional yield generation strategy across both NSE Equities and MCX Commodities.
         
         #### 1. Core Filtration & Ranking Engine
-        * **Strict Positive Net Yield:** Any F&O stock spread that results in a net profit of ₹0 or less is strictly removed from the calculation. You will never see a trade that loses money to taxes.
-        * **ROTC (Return on Total Capital) Sorting:** Trades are sorted by true capital efficiency. The system calculates the exact cash required for the delivery leg + the ~20% SPAN/Exposure margin required for the short futures leg. 
-        * **Bid-Ask Spread Filter:** Fetches live level-2 market depth (`buy[0]` and `sell[0]`). If the gap exceeds the sidebar limit (e.g. ₹0.50), the stock is flagged as unexecutable due to slippage risk.
-        * **Dynamic DTE Rollover:** To protect against Expiry Week physical delivery margins (where exchange requirements spike by 50%), the scanner automatically rolls over to track the *next* month's futures contract when Days to Expiry (DTE) hits the safe threshold.
-        * **Dividend & F&O Ban Flagging:** Any yield artificially bloated above 25% p.a. triggers a `⚠️ Dividend/Ban Check` tag to alert the desk to review corporate actions before execution.
-        * **MCX Dynamic Shift:** The MCX calendar spread engine is strictly pegged to calculate (Far Month - Active Scanner Month), ensuring the spread tracker rolls over seamlessly with the equity module.
+        * **Strict Positive Net Yield:** Any spread (NSE or MCX) that results in a net profit of ₹0 or less is strictly removed from the calculation. You will never see a trade that loses money to taxes.
+        * **ROTC (Return on Total Capital) Sorting:** Trades are sorted by true capital efficiency. Equity ROTC assumes full delivery cash + ~20% future margin. MCX ROTC assumes a standard ~10% calendar spread margin execution block.
+        * **Bid-Ask Spread Filter:** Fetches live level-2 market depth (`buy[0]` and `sell[0]`). If the gap exceeds the sidebar limit, the instrument is flagged as unexecutable to prevent execution slippage traps.
+        * **Dynamic MCX Tender Warning:** Because commodities require physical warehousing delivery, calendar spreads must be squared off manually *before* the tender period begins (usually 5 days prior to MCX expiry). 
 
         ---
 
         ### 🧾 Zerodha Net Profit Tax & Charges Breakdown
-        The internal `calculate_arbitrage_net_profit` function strictly deducts the following exact exchange and regulatory fees to output true, post-tax net profit.
+        The internal calculation functions strictly deduct the exact exchange and regulatory fees to output true, post-tax net profit.
 
-        **A. Equity Cash Leg (Delivery Buy + Sell)**
-        *   **Brokerage:** ₹0
-        *   **STT (Securities Transaction Tax):** 0.1% charged on both Buy and Sell turnover.
-        *   **Exchange Transaction Charge:** 0.00307% (NSE) on both Buy and Sell turnover.
-        *   **Stamp Duty:** 0.015% charged on the Buy side turnover only.
-        *   **SEBI Charges:** ₹10 per crore (0.0001%) on both sides.
-        *   **DP Charge (Depository Participant):** Flat ₹13.5 + 18% GST (₹15.93) deducted once when shares are sold from the demat account.
-        *   **GST:** 18% applied strictly on (Brokerage + Exchange Charges + SEBI Charges).
+        **A. Equity Arbitrage (Delivery Leg + Future Leg)**
+        *   **STT:** 0.1% on Equity Delivery (Buy & Sell) + 0.02% on Short Future (Sell only).
+        *   **Brokerage:** ₹0 for Equity CNC + ₹40 round-trip for NRML Future.
+        *   **Exchange Txn:** 0.00307% (NSE Cash) + 0.00183% (NSE F&O).
+        *   **DP Charge:** Flat ₹15.93 deducted once when demat shares are sold.
+        *   **GST:** 18% applied on (Brokerage + Exchange Charges + SEBI).
 
-        **B. Equity Futures Leg (Short Entry + Buy Exit)**
-        *   **Brokerage:** Flat ₹20 per executed order (₹40 total for round trip).
-        *   **STT:** 0.02% charged on the Sell (Short) side turnover only.
-        *   **Exchange Transaction Charge:** 0.00183% (NSE) on both Buy and Sell turnover.
-        *   **Stamp Duty:** 0.002% charged on the Buy (Square-off) side turnover only.
-        *   **SEBI Charges:** ₹10 per crore (0.0001%) on both sides.
+        **B. MCX Calendar Spread (Near Leg + Far Leg)**
+        *   **CTT (Commodity Transaction Tax):** 0.01% applied exclusively on the Sell side turnover of both the near and far leg.
+        *   **Brokerage:** Flat ₹20 per executed order = ₹80 total for the 4-leg round trip.
+        *   **Exchange Txn Charge:** ~0.0021% applied to the total turnover of all legs.
+        *   **Stamp Duty:** 0.002% charged on the Buy side turnover only.
         *   **GST:** 18% applied strictly on (Brokerage + Exchange Charges + SEBI Charges).
         """)
 
